@@ -329,16 +329,23 @@ function loadAgentRegistry(): AgentRegistry {
         console.error(`[ax-platform] AX_AGENTS must be a JSON array`);
       } else {
         for (const agent of agents) {
-          // Validate entry is an object with id and secret strings
-          if (typeof agent !== 'object' || agent === null) {
+          // Validate entry is an object
+          if (!agent || typeof agent !== 'object') {
             console.warn(`[ax-platform] Skipping invalid AX_AGENTS entry: not an object`);
             continue;
           }
-          const id = typeof agent.id === 'string' ? agent.id.trim() : '';
-          const secret = typeof agent.secret === 'string' ? agent.secret.trim() : '';
+
+          // Validate id and secret are strings
+          if (typeof agent.id !== 'string' || typeof agent.secret !== 'string') {
+            console.warn(`[ax-platform] Skipping AX_AGENTS entry with missing or non-string id/secret`);
+            continue;
+          }
+
+          const id = agent.id.trim();
+          const secret = agent.secret.trim();
 
           if (!id || !secret) {
-            console.warn(`[ax-platform] Skipping AX_AGENTS entry with missing id or secret`);
+            console.warn(`[ax-platform] Skipping AX_AGENTS entry with empty id or secret`);
             continue;
           }
           if (!VALID_AGENT_ID_PATTERN.test(id)) {
