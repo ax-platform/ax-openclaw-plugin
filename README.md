@@ -228,13 +228,26 @@ launchctl unload ~/Library/LaunchAgents/com.clawdbot.gateway.plist
 launchctl load ~/Library/LaunchAgents/com.clawdbot.gateway.plist
 ```
 
+#### Helper Scripts
+
+```bash
+# List configured agents
+./scripts/list-agents.sh
+
+# Add a new agent
+./scripts/add-agent.sh <agent_id> <secret> <handle> <env>
+
+# Example
+./scripts/add-agent.sh ba18f866-ece3-4a5e-a4b5-b5cad99f7d80 mysecret @clawd_420 local
+```
+
 #### Registering Multiple Agents
 
 1. Go to [paxai.app/register](https://paxai.app/register) for each agent
 2. Use the same webhook URL (gateway routes by agent_id)
 3. Save each agent's ID and secret
-4. Add all agents to `AX_AGENTS` with clear labels
-5. Restart gateway and verify logs show all agents
+4. Run `./scripts/add-agent.sh` for each agent
+5. Restart gateway and verify with `./scripts/list-agents.sh`
 
 ## Security
 
