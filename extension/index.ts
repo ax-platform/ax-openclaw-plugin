@@ -298,7 +298,57 @@ interface AxDispatchResponse {
 // Configuration
 // =============================================================================
 
-// Webhook secret for HMAC verification (set via env or config)
+// Multi-agent config: { agent_id: webhook_secret }
+interface AgentConfig {
+  [agentId: string]: string;
+}
+
+let agentSecrets: AgentConfig | null = null;
+
+function loadAgentSecrets(): AgentConfig {
+  if (agentSecrets) return agentSecrets;
+
+  agentSecrets = {};
+
+  // Load from AX_AGENTS JSON env var: [{"id":"...","secret":"..."},...]
+  const agentsJson = process.env.AX_AGENTS;
+  if (agentsJson) {
+    try {
+      const agents = JSON.parse(agentsJson) as Array<{ id: string; secret: string }>;
+      for (const agent of agents) {
+        if (agent.id && agent.secret) {
+          agentSecrets[agent.id] = agent.secret;
+        }
+      }
+    } catch (err) {
+      console.error(`[ax-platform] Failed to parse AX_AGENTS: ${err}`);
+    }
+  }
+
+  // Also load single-agent config as fallback
+  const singleId = process.env.AX_AGENT_ID;
+  const singleSecret = process.env.AX_WEBHOOK_SECRET;
+  if (singleId && singleSecret) {
+    agentSecrets[singleId] = singleSecret;
+  }
+
+  return agentSecrets;
+}
+
+// Get secret for a specific agent, or fall back to default
+function getWebhookSecretForAgent(agentId?: string): string | undefined {
+  const secrets = loadAgentSecrets();
+
+  // Try agent-specific secret first
+  if (agentId && secrets[agentId]) {
+    return secrets[agentId];
+  }
+
+  // Fall back to default single-agent secret
+  return process.env.AX_WEBHOOK_SECRET;
+}
+
+// Legacy: get any configured secret (for backwards compatibility)
 const getWebhookSecret = (): string | undefined => {
   return process.env.AX_WEBHOOK_SECRET;
 };
@@ -403,10 +453,6 @@ function createAxDispatchHandler(api: ClawdbotPluginApi) {
       const body = await readBody(req);
       api.logger.info(`[ax-platform] Body received (${body.length} bytes)`);
 
-      // Verify HMAC signature if secret is configured
-      const webhookSecret = getWebhookSecret();
-      api.logger.info(`[ax-platform] Webhook secret configured: ${!!webhookSecret}`);
-
       // Debug: log first 1000 chars of payload
       api.logger.info(`[ax-platform] Payload preview: ${body.substring(0, 1000)}`);
 
@@ -414,6 +460,18 @@ function createAxDispatchHandler(api: ClawdbotPluginApi) {
       const hasAuthToken = body.includes('"auth_token"');
       const hasMcpEndpoint = body.includes('"mcp_endpoint"');
       api.logger.info(`[ax-platform] Has auth_token: ${hasAuthToken}, Has mcp_endpoint: ${hasMcpEndpoint}`);
+
+      // Peek at agent_id from body to look up correct secret (multi-agent support)
+      let peekAgentId: string | undefined;
+      const agentIdMatch = body.match(/"agent_id"\s*:\s*"([^"]+)"/);
+      if (agentIdMatch) {
+        peekAgentId = agentIdMatch[1];
+        api.logger.info(`[ax-platform] Peeked agent_id: ${peekAgentId}`);
+      }
+
+      // Verify HMAC signature with agent-specific secret
+      const webhookSecret = getWebhookSecretForAgent(peekAgentId);
+      api.logger.info(`[ax-platform] Webhook secret configured: ${!!webhookSecret} (agent: ${peekAgentId || 'default'})`);
 
       if (webhookSecret) {
         const signature = req.headers["x-ax-signature"] as string | undefined;
