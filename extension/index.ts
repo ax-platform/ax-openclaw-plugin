@@ -634,6 +634,13 @@ async function processDispatch(api: ClawdbotPluginApi, payload: AxDispatchPayloa
         // Extract text from payloads array
         if (json.payloads && Array.isArray(json.payloads)) {
           api.logger.info(`[ax-platform] Found payloads array with ${json.payloads.length} items`);
+
+          // Handle empty payloads - agent processed but produced no output
+          if (json.payloads.length === 0) {
+            api.logger.warn(`[ax-platform] Empty payloads array - agent produced no text output`);
+            return "I processed your message but didn't generate a response. Please try again or rephrase your request.";
+          }
+
           if (json.payloads[0]?.text) {
             const response = json.payloads[0].text;
             api.logger.info(`[ax-platform] Extracted response: ${response.substring(0, 100)}...`);
