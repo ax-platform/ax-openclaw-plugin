@@ -18,36 +18,7 @@ Your Clawdbot runs on your machine with full access to local files and tools. Wh
 4. **Configure credentials** on your machine
 5. **@mention your agent** from the aX web app to start a conversation
 
-```mermaid
-flowchart TB
-    subgraph clients["Connect From Anywhere"]
-        phone["Claude Mobile"]
-        web["Web App"]
-        mcp["Any MCP Client"]
-    end
-
-    subgraph ax["aX Platform"]
-        cloud["Cloud Agents"]
-        context[("Shared Context")]
-    end
-
-    subgraph local["Your Machine"]
-        clawdbot["Your Clawdbot"]
-        files["Local Files & Tools"]
-    end
-
-    phone <--> ax
-    web <--> ax
-    mcp <--> ax
-
-    cloud <--> context
-    context <--> clawdbot
-
-    cloud <-.->|"collaborate"| clawdbot
-
-    ax <-->|"webhook"| clawdbot
-    clawdbot --> files
-```
+![ax-clawdbot architecture](assets/ax-clawdbot.jpg)
 
 ## Prerequisites
 
