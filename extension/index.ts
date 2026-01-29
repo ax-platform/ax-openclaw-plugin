@@ -45,6 +45,49 @@ interface McpResponse {
 
 let mcpRequestId = 0;
 
+// =============================================================================
+// Progress Reporting - POST updates to backend during processing
+// =============================================================================
+
+async function sendProgressUpdate(
+  logger: ClawdbotPluginApi["logger"],
+  authToken: string,
+  dispatchId: string,
+  status: "processing" | "completed" | "error",
+  tool?: string,
+  message?: string,
+): Promise<void> {
+  // Backend endpoint for progress updates
+  // Gateway runs on host, so use localhost:8001 (Docker maps 8001->8080)
+  const backendUrl = process.env.AX_BACKEND_URL || "http://localhost:8001";
+  const progressUrl = `${backendUrl}/api/v1/webhooks/progress`;
+
+  try {
+    const response = await fetch(progressUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${authToken}`,
+      },
+      body: JSON.stringify({
+        dispatch_id: dispatchId,
+        status,
+        tool,
+        message,
+      }),
+    });
+
+    if (response.ok) {
+      logger.info(`[ax-platform] Progress update sent: ${tool || status} - ${message || ''}`);
+    } else {
+      logger.warn(`[ax-platform] Progress update failed: ${response.status}`);
+    }
+  } catch (err) {
+    // Fire-and-forget - don't fail the dispatch if progress reporting fails
+    logger.warn(`[ax-platform] Progress update error (non-fatal): ${err}`);
+  }
+}
+
 // Token refresh on 401 - uses webhook_secret to sign refresh request
 async function refreshToken(
   logger: ClawdbotPluginApi["logger"],
@@ -394,16 +437,20 @@ function createAxDispatchHandler(api: ClawdbotPluginApi) {
 
       // Validate required fields (auth_token optional for V3 which uses header auth)
       const agentHandle = payload.agent_handle || payload.agent_name;
-      if (!payload.dispatch_id || !agentHandle) {
-        api.logger.warn(`[ax-platform] Validation failed: dispatch_id=${payload.dispatch_id}, agent_handle=${agentHandle}`);
+      // Generate dispatch_id from message_id if not provided (external agents may not have it)
+      const dispatchId = payload.dispatch_id || payload.message_id || `ext-${Date.now()}`;
+      if (!agentHandle) {
+        api.logger.warn(`[ax-platform] Validation failed: agent_handle=${agentHandle}`);
         sendJson(res, 400, {
           status: "error",
-          dispatch_id: payload.dispatch_id || "unknown",
-          error: "Missing required fields: dispatch_id, agent_handle/agent_name",
+          dispatch_id: dispatchId,
+          error: "Missing required field: agent_handle/agent_name",
         } satisfies AxDispatchResponse);
         return true;
       }
-      api.logger.info(`[ax-platform] Validation passed`);
+      // Use generated dispatch_id for the rest of the flow
+      payload.dispatch_id = dispatchId;
+      api.logger.info(`[ax-platform] Validation passed (dispatch_id=${dispatchId})`);
 
       // V3 has sender_handle at top level, V2 has it nested in message
       const senderHandle = payload.sender_handle || payload.message?.sender_handle || "unknown";
@@ -465,8 +512,8 @@ async function processDispatch(api: ClawdbotPluginApi, payload: AxDispatchPayloa
   }
 
   try {
-    // Session per space+sender for conversation continuity
-    const sessionId = `ax-${payload.space_id || 'default'}-${payload.sender_id || 'unknown'}`;
+    // One container per agent - agent_id is the identity
+    const sessionId = `ax-agent-${payload.agent_id || 'default'}`;
 
     // Extract just the message content (remove the "username (type): " prefix if present)
     let cleanPrompt = prompt;
@@ -494,6 +541,18 @@ async function processDispatch(api: ClawdbotPluginApi, payload: AxDispatchPayloa
     const escapedPrompt = promptWithContext.replace(/'/g, "'\\''");
 
     api.logger.info(`[ax-platform] Calling moltbot agent with session ${sessionId}...`);
+
+    // Send "thinking" progress update so frontend shows spinner
+    if (payload.auth_token && payload.dispatch_id) {
+      sendProgressUpdate(
+        api.logger,
+        payload.auth_token,
+        payload.dispatch_id,
+        "processing",
+        "thinking",
+        "Processing request..."
+      ).catch(() => {}); // Fire-and-forget
+    }
 
     // Pass aX env vars explicitly to subprocess so tools can access them
     const subprocessEnv = {
@@ -543,6 +602,32 @@ async function processDispatch(api: ClawdbotPluginApi, payload: AxDispatchPayloa
       if (jsonStr) {
         api.logger.info(`[ax-platform] Found JSON (${jsonStr.length} chars)`);
         api.logger.info(`[ax-platform] JSON preview: ${jsonStr.substring(0, 300)}`);
+
+        // IMPORTANT: clawdbot --json can output duplicate "text" keys (invalid JSON)
+        // JSON.parse() only keeps one, so we extract ALL text values from raw string first
+        const textValues: string[] = [];
+        const textRegex = /"text"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+        let match;
+        while ((match = textRegex.exec(jsonStr)) !== null) {
+          // Unescape JSON string (handle \n, \", etc.)
+          const unescaped = match[1]
+            .replace(/\\n/g, '\n')
+            .replace(/\\r/g, '\r')
+            .replace(/\\t/g, '\t')
+            .replace(/\\"/g, '"')
+            .replace(/\\\\/g, '\\');
+          textValues.push(unescaped);
+        }
+
+        if (textValues.length > 0) {
+          api.logger.info(`[ax-platform] Found ${textValues.length} text values in raw JSON`);
+          // Concatenate all text values with newlines
+          const response = textValues.join('\n\n');
+          api.logger.info(`[ax-platform] Combined response: ${response.substring(0, 100)}...`);
+          return response;
+        }
+
+        // Fallback to standard JSON parsing if regex didn't find text
         const json = JSON.parse(jsonStr);
         api.logger.info(`[ax-platform] Parsed JSON keys: ${Object.keys(json).join(', ')}`);
 
