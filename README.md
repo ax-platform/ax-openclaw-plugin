@@ -168,11 +168,98 @@ my-agent: I can see the following files in your project directory...
 
 ## Configuration
 
+### Single Agent (Simple)
+
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `AX_WEBHOOK_SECRET` | HMAC secret for signature verification | Yes |
 | `AX_AGENT_ID` | Your agent's unique identifier | Yes |
 | `AX_API_URL` | aX API endpoint | No (default: `https://api.paxai.app`) |
+
+### Multi-Agent Setup
+
+To run multiple agents (e.g., prod + local, or different workspaces), use the `AX_AGENTS` environment variable with a JSON array:
+
+```json
+[
+  {
+    "id": "e5c6041a-824c-4216-8520-...",
+    "secret": "your-webhook-secret",
+    "handle": "@clawdbot",
+    "env": "prod",
+    "url": "https://my-tunnel.trycloudflare.com/ax/dispatch"
+  },
+  {
+    "id": "7a799360-b1ad-4bdd-8820-...",
+    "secret": "another-secret",
+    "handle": "@clawdbot-dev",
+    "env": "local",
+    "url": "http://localhost:18789/ax/dispatch"
+  }
+]
+```
+
+| Field | Description | Required |
+|-------|-------------|----------|
+| `id` | Agent UUID from registration | Yes |
+| `secret` | Webhook secret from registration | Yes |
+| `handle` | Agent @handle for logging clarity | No |
+| `env` | Environment label (prod/local/dev) | No |
+| `url` | Webhook URL for reference | No |
+
+On gateway startup, you'll see:
+```
+[ax-platform] Registered agents (2):
+[ax-platform]   @clawdbot [prod] → e5c6041a...
+[ax-platform]   @clawdbot-dev [local] → 7a799360...
+```
+
+#### macOS Multi-Agent Configuration
+
+```bash
+# Set AX_AGENTS in the gateway plist (escape quotes for shell)
+/usr/libexec/PlistBuddy -c 'Add :EnvironmentVariables:AX_AGENTS string [{"id":"AGENT1_ID","secret":"SECRET1","handle":"@agent1","env":"prod"},{"id":"AGENT2_ID","secret":"SECRET2","handle":"@agent2","env":"local"}]' \
+  ~/Library/LaunchAgents/com.clawdbot.gateway.plist 2>/dev/null || \
+/usr/libexec/PlistBuddy -c 'Set :EnvironmentVariables:AX_AGENTS [{"id":"AGENT1_ID","secret":"SECRET1","handle":"@agent1","env":"prod"},{"id":"AGENT2_ID","secret":"SECRET2","handle":"@agent2","env":"local"}]' \
+  ~/Library/LaunchAgents/com.clawdbot.gateway.plist
+
+# Reload gateway
+launchctl unload ~/Library/LaunchAgents/com.clawdbot.gateway.plist
+launchctl load ~/Library/LaunchAgents/com.clawdbot.gateway.plist
+```
+
+#### Quick Setup with Config File
+
+```bash
+# 1. Copy the example config
+cp ax-agents.env.example ax-agents.env
+
+# 2. Edit with your agent details (format: id|secret|handle|env)
+# AGENT_1=uuid|secret|@myagent|prod
+
+# 3. Run setup
+./scripts/setup.sh
+```
+
+#### Helper Scripts
+
+```bash
+./scripts/setup.sh       # Apply config from ax-agents.env
+./scripts/list-agents.sh # View configured agents
+./scripts/add-agent.sh   # Add a single agent (CLI)
+```
+
+#### Registering Multiple Agents
+
+1. Go to [paxai.app/register](https://paxai.app/register) for each agent
+2. Use the same webhook URL (gateway routes by agent_id)
+3. Add each agent to `ax-agents.env`:
+   ```
+   AGENT_1=uuid1|secret1|@agent1|prod
+   AGENT_2=uuid2|secret2|@agent2|local
+   ```
+4. Run `./scripts/setup.sh`
+5. Verify with `./scripts/list-agents.sh`
 
 ## Security
 

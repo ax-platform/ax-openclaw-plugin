@@ -295,22 +295,32 @@ interface AxDispatchResponse {
 // Configuration
 // =============================================================================
 
-// Multi-agent config: { agent_id: webhook_secret }
-interface AgentConfig {
-  [agentId: string]: string;
+// Agent entry with full metadata for clarity
+interface AgentEntry {
+  id: string;
+  secret: string;
+  handle?: string;  // e.g., "@clawdbot"
+  env?: string;     // e.g., "prod", "local", "dev"
+  url?: string;     // webhook URL for reference
 }
 
-let agentSecrets: AgentConfig | null = null;
+// Multi-agent config: { agent_id: AgentEntry }
+interface AgentRegistry {
+  [agentId: string]: AgentEntry;
+}
+
+let agentRegistry: AgentRegistry | null = null;
 
 // Validate agent ID format (UUID or alphanumeric with hyphens/underscores)
 const VALID_AGENT_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
 
-function loadAgentSecrets(): AgentConfig {
-  if (agentSecrets) return agentSecrets;
+function loadAgentRegistry(): AgentRegistry {
+  if (agentRegistry) return agentRegistry;
 
-  agentSecrets = {};
+  agentRegistry = {};
 
-  // Load from AX_AGENTS JSON env var: [{"id":"...","secret":"..."},...]
+  // Load from AX_AGENTS JSON env var:
+  // [{"id":"...","secret":"...","handle":"@name","env":"prod","url":"https://..."},...]
   const agentsJson = process.env.AX_AGENTS;
   if (agentsJson) {
     try {
@@ -319,28 +329,42 @@ function loadAgentSecrets(): AgentConfig {
         console.error(`[ax-platform] AX_AGENTS must be a JSON array`);
       } else {
         for (const agent of agents) {
-          // Validate entry is an object with id and secret strings
-          if (typeof agent !== 'object' || agent === null) {
+          // Validate entry is an object
+          if (!agent || typeof agent !== 'object') {
             console.warn(`[ax-platform] Skipping invalid AX_AGENTS entry: not an object`);
             continue;
           }
-          const id = typeof agent.id === 'string' ? agent.id.trim() : '';
-          const secret = typeof agent.secret === 'string' ? agent.secret.trim() : '';
+
+          // Validate id and secret are strings
+          if (typeof agent.id !== 'string' || typeof agent.secret !== 'string') {
+            console.warn(`[ax-platform] Skipping AX_AGENTS entry with missing or non-string id/secret`);
+            continue;
+          }
+
+          const id = agent.id.trim();
+          const secret = agent.secret.trim();
 
           if (!id || !secret) {
-            console.warn(`[ax-platform] Skipping AX_AGENTS entry with missing id or secret`);
+            console.warn(`[ax-platform] Skipping AX_AGENTS entry with empty id or secret`);
             continue;
           }
           if (!VALID_AGENT_ID_PATTERN.test(id)) {
             console.warn(`[ax-platform] Skipping AX_AGENTS entry with invalid id format: ${id.substring(0, 20)}`);
             continue;
           }
-          if (agentSecrets[id]) {
+          if (agentRegistry[id]) {
             console.warn(`[ax-platform] Duplicate agent id in AX_AGENTS: ${id.substring(0, 20)}`);
           }
-          agentSecrets[id] = secret;
+
+          // Store full entry with optional metadata
+          agentRegistry[id] = {
+            id,
+            secret,
+            handle: typeof agent.handle === 'string' ? agent.handle.trim() : undefined,
+            env: typeof agent.env === 'string' ? agent.env.trim() : undefined,
+            url: typeof agent.url === 'string' ? agent.url.trim() : undefined,
+          };
         }
-        console.log(`[ax-platform] Loaded ${Object.keys(agentSecrets).length} agent(s) from AX_AGENTS`);
       }
     } catch (err) {
       console.error(`[ax-platform] Failed to parse AX_AGENTS: ${err}`);
@@ -350,24 +374,64 @@ function loadAgentSecrets(): AgentConfig {
   // Also load single-agent config as fallback
   const singleId = process.env.AX_AGENT_ID;
   const singleSecret = process.env.AX_WEBHOOK_SECRET;
-  if (singleId && singleSecret && !agentSecrets[singleId]) {
-    agentSecrets[singleId] = singleSecret;
+  if (singleId && singleSecret && !agentRegistry[singleId]) {
+    agentRegistry[singleId] = {
+      id: singleId,
+      secret: singleSecret,
+      env: 'default',
+    };
   }
 
-  return agentSecrets;
+  return agentRegistry;
+}
+
+// Log registered agents on startup for clarity
+function logRegisteredAgents(): void {
+  const registry = loadAgentRegistry();
+  const agents = Object.values(registry);
+
+  if (agents.length === 0) {
+    console.log(`[ax-platform] No agents configured. Set AX_AGENTS or AX_AGENT_ID + AX_WEBHOOK_SECRET.`);
+    return;
+  }
+
+  console.log(`[ax-platform] Registered agents (${agents.length}):`);
+  for (const agent of agents) {
+    const handle = agent.handle || '(no handle)';
+    const env = agent.env || '(no env)';
+    const idPreview = agent.id.substring(0, 8) + '...';
+    console.log(`[ax-platform]   ${handle} [${env}] → ${idPreview}`);
+  }
+}
+
+// Legacy helper for backward compatibility
+function loadAgentSecrets(): { [agentId: string]: string } {
+  const registry = loadAgentRegistry();
+  const secrets: { [agentId: string]: string } = {};
+  for (const [id, entry] of Object.entries(registry)) {
+    secrets[id] = entry.secret;
+  }
+  return secrets;
 }
 
 // Get secret for a specific agent, or fall back to default
 function getWebhookSecretForAgent(agentId?: string): string | undefined {
-  const secrets = loadAgentSecrets();
+  const registry = loadAgentRegistry();
 
   // Try agent-specific secret first
-  if (agentId && secrets[agentId]) {
-    return secrets[agentId];
+  if (agentId && registry[agentId]) {
+    return registry[agentId].secret;
   }
 
   // Fall back to default single-agent secret
   return process.env.AX_WEBHOOK_SECRET;
+}
+
+// Get agent entry for logging/debugging
+function getAgentEntry(agentId?: string): AgentEntry | undefined {
+  if (!agentId) return undefined;
+  const registry = loadAgentRegistry();
+  return registry[agentId];
 }
 
 // Legacy: get any configured secret (for backwards compatibility)
@@ -497,7 +561,11 @@ function createAxDispatchHandler(api: ClawdbotPluginApi) {
 
       // Verify HMAC signature with agent-specific secret
       const webhookSecret = getWebhookSecretForAgent(peekAgentId);
-      api.logger.info(`[ax-platform] Webhook secret configured: ${!!webhookSecret} (agent: ${peekAgentId || 'default'})`);
+      const agentEntry = getAgentEntry(peekAgentId);
+      const agentLabel = agentEntry
+        ? `${agentEntry.handle || peekAgentId?.substring(0, 8)} [${agentEntry.env || 'unknown'}]`
+        : peekAgentId || 'default';
+      api.logger.info(`[ax-platform] Dispatch for: ${agentLabel} (secret: ${webhookSecret ? 'yes' : 'NO'})`);
 
       if (webhookSecret) {
         const signature = req.headers["x-ax-signature"] as string | undefined;
@@ -947,6 +1015,9 @@ const plugin = {
   configSchema: emptyPluginConfigSchema(),
   register(api: ClawdbotPluginApi) {
     api.logger.info("[ax-platform] Extension loading...");
+
+    // Log configured agents for visibility
+    logRegisteredAgents();
 
     // Register HTTP handlers
     const dispatchHandler = createAxDispatchHandler(api);

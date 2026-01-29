@@ -1,7 +1,18 @@
+# Dependencies
 node_modules/
+
+# OS files
 .DS_Store
+
+# Logs
 *.log
+
+# Environment files
 .env
 
-# Local documentation (not committed)
+# Local docs (gitignored, fetched separately)
 docs/
+
+# Agent config files (contain secrets)
+ax-agents.yaml
+ax-agents.env

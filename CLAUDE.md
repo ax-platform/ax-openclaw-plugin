@@ -97,12 +97,24 @@ Session ID: ax-agent-{agent_id}
 
 | Variable | Purpose |
 |----------|---------|
-| `AX_WEBHOOK_SECRET` | HMAC secret for signature verification |
+| `AX_AGENTS` | Multi-agent config JSON: `[{"id":"...","secret":"...","handle":"@name","env":"prod"}]` |
+| `AX_WEBHOOK_SECRET` | HMAC secret (single-agent fallback) |
+| `AX_AGENT_ID` | Agent ID (single-agent fallback) |
 | `AX_AUTH_TOKEN` | Bearer token for MCP tool calls (set from dispatch) |
 | `AX_MCP_ENDPOINT` | aX MCP server endpoint (set from dispatch) |
-| `AX_AGENT_ID` | Agent identity (set from dispatch) |
 | `AX_BACKEND_URL` | Backend API for progress updates (default: localhost:8001) |
 | `CLAWDBOT_CMD` | Path to clawdbot binary |
+
+### Multi-Agent Config Format
+
+```json
+[
+  {"id": "uuid", "secret": "...", "handle": "@clawdbot", "env": "prod", "url": "https://..."},
+  {"id": "uuid", "secret": "...", "handle": "@clawdbot-dev", "env": "local"}
+]
+```
+
+On startup, logs show: `[ax-platform] @clawdbot [prod] → e5c6041a...`
 
 ### Multi-text Response Handling
 

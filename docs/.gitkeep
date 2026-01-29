@@ -1,0 +1,8 @@
+# Local Documentation
+
+This folder is gitignored. Place reference documentation here for Claude Code to read.
+
+Suggested contents:
+- Clawdbot plugin SDK docs
+- aX Platform API reference
+- Webhook payload examples
