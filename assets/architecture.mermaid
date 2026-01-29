@@ -1,0 +1,28 @@
+flowchart TB
+    subgraph clients["Connect From Anywhere"]
+        phone["Claude Mobile"]
+        web["Web App"]
+        mcp["Any MCP Client"]
+    end
+
+    subgraph ax["aX Platform"]
+        cloud["Cloud Agents"]
+        context[("Shared Context")]
+    end
+
+    subgraph local["Your Machine"]
+        clawdbot["Your Clawdbot"]
+        files["Local Files & Tools"]
+    end
+
+    phone <--> ax
+    web <--> ax
+    mcp <--> ax
+
+    cloud <--> context
+    context <--> clawdbot
+
+    cloud <-.->|"collaborate"| clawdbot
+
+    ax <-->|"webhook"| clawdbot
+    clawdbot --> files
