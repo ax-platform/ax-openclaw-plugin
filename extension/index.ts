@@ -1,7 +1,7 @@
 /**
  * aX Platform Plugin
  *
- * Native Moltbot plugin that connects agents to aX Platform.
+ * Native Clawdbot plugin that connects agents to aX Platform.
  *
  * Features:
  * - Channel: Bidirectional messaging with aX backend
@@ -9,12 +9,14 @@
  * - Hook: agent:bootstrap for mission briefing injection
  */
 
-import { registerPluginHooksFromDir } from "moltbot/plugin-sdk";
-import { createAxChannel, createDispatchHandler } from "./channel/ax-channel.js";
+import type { ClawdbotPluginApi, PluginRuntime } from "clawdbot/plugin-sdk";
+import { createAxChannel, createDispatchHandler, setAxPlatformRuntime, getDispatchSession } from "./channel/ax-channel.js";
+import { logRegisteredAgents } from "./lib/auth.js";
 import { axMessagesTool } from "./tools/ax-messages.js";
 import { axTasksTool } from "./tools/ax-tasks.js";
 import { axContextTool } from "./tools/ax-context.js";
 import { axAgentsTool } from "./tools/ax-agents.js";
+import { buildMissionBriefing } from "./lib/context.js";
 
 interface AxPlatformConfig {
   agents?: Array<{
@@ -26,61 +28,132 @@ interface AxPlatformConfig {
   backendUrl?: string;
 }
 
-interface PluginApi {
-  logger: {
-    info: (msg: string) => void;
-    warn: (msg: string) => void;
-    error: (msg: string) => void;
-  };
-  config?: AxPlatformConfig;
-  registerChannel: (opts: { plugin: unknown }) => void;
-  registerTool: (tool: unknown, opts?: { optional?: boolean }) => void;
-  registerHttpHandler: (handler: unknown) => void;
-}
+const plugin = {
+  id: "ax-platform",
+  name: "aX Platform Integration",
+  description: "Connect Clawdbot agents to aX Platform cloud collaboration",
+  configSchema: {
+    type: "object" as const,
+    additionalProperties: false,
+    properties: {
+      agents: {
+        type: "array" as const,
+        items: {
+          type: "object" as const,
+          properties: {
+            id: { type: "string" as const },
+            secret: { type: "string" as const },
+            handle: { type: "string" as const },
+            env: { type: "string" as const },
+          },
+          required: ["id", "secret"],
+        },
+      },
+      backendUrl: { type: "string" as const },
+    },
+  },
 
-export default function register(api: PluginApi) {
-  api.logger.info("[ax-platform] Plugin loading...");
+  register(api: ClawdbotPluginApi) {
+    api.logger.info("[ax-platform] Plugin loading...");
 
-  const config = api.config || {};
+    // Store runtime for channel to access
+    setAxPlatformRuntime(api.runtime);
 
-  // Register the aX Platform channel
-  const channel = createAxChannel(config);
-  api.registerChannel({ plugin: channel });
-  api.logger.info("[ax-platform] Channel registered: ax-platform");
-
-  // Register aX tools
-  api.registerTool(axMessagesTool, { optional: true });
-  api.registerTool(axTasksTool, { optional: true });
-  api.registerTool(axContextTool, { optional: true });
-  api.registerTool(axAgentsTool, { optional: true });
-  api.logger.info("[ax-platform] Tools registered: ax_messages, ax_tasks, ax_context, ax_agents");
-
-  // Register bootstrap hook (injects mission briefing)
-  registerPluginHooksFromDir(api, "./hooks");
-  api.logger.info("[ax-platform] Hooks registered: ax-bootstrap");
-
-  // Register HTTP handler for /ax/dispatch
-  const dispatchHandler = createDispatchHandler(
-    api,
-    config,
-    async (sessionKey, message) => {
-      // Use Moltbot's agent runner via the channel
-      // The channel's sendText will be called when agent responds
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          reject(new Error("Agent timeout (120s)"));
-        }, 120000);
-
-        // TODO: Wire up to api.runtime.agent.run() when available
-        // For now, this is a placeholder
-        api.logger.info(`[ax-platform] Would run agent: ${sessionKey} with message: ${message.substring(0, 50)}...`);
-        clearTimeout(timeout);
-        resolve(`[Plugin placeholder] Received: ${message.substring(0, 100)}`);
-      });
+    const config = (api.config || {}) as AxPlatformConfig;
+    api.logger.info(`[ax-platform] Config received: agents=${config.agents?.length || 0}, backendUrl=${config.backendUrl || 'default'}`);
+    if (config.agents && config.agents.length > 0) {
+      api.logger.info(`[ax-platform] Config agents from api.config:`);
+      for (const a of config.agents) {
+        api.logger.info(`[ax-platform]   ${a.handle || 'unknown'}: ${a.secret?.substring(0, 8) || 'no-secret'}...`);
+      }
     }
-  );
-  api.registerHttpHandler(dispatchHandler);
-  api.logger.info("[ax-platform] HTTP handler registered: /ax/dispatch");
 
-  api.logger.info("[ax-platform] Plugin loaded successfully");
-}
+    // Register the aX Platform channel
+    const channel = createAxChannel(config);
+    api.registerChannel({ plugin: channel });
+    api.logger.info("[ax-platform] Channel registered: ax-platform");
+
+    // Log registered agents for diagnostics
+    logRegisteredAgents(api.logger);
+
+    // Register aX tools (optional - must be enabled in agent config)
+    api.registerTool(axMessagesTool, { optional: true });
+    api.registerTool(axTasksTool, { optional: true });
+    api.registerTool(axContextTool, { optional: true });
+    api.registerTool(axAgentsTool, { optional: true });
+    api.logger.info("[ax-platform] Tools registered: ax_messages, ax_tasks, ax_context, ax_agents");
+
+    // Try to register before_agent_start hook for context injection
+    // Using (api as any) to bypass TypeScript interface limitations
+    const apiAny = api as any;
+    if (typeof apiAny.registerHook === "function") {
+      apiAny.registerHook("before_agent_start", async (run: any) => {
+        const sessionKey = run.sessionKey;
+        if (!sessionKey?.startsWith("ax-agent-")) {
+          return; // Not an aX session
+        }
+
+        const session = getDispatchSession(sessionKey);
+        if (!session) {
+          return; // No context available
+        }
+
+        // Build and inject mission briefing
+        const briefing = buildMissionBriefing(
+          session.agentHandle,
+          session.spaceName,
+          session.senderHandle,
+          session.contextData
+        );
+
+        // Prepend to system prompt
+        if (run.systemPrompt !== undefined) {
+          run.systemPrompt = `${briefing}\n\n---\n\n${run.systemPrompt || ""}`;
+        }
+
+        // Also add as context file if supported
+        if (Array.isArray(run.contextFiles)) {
+          run.contextFiles.push({
+            name: "AX_MISSION.md",
+            content: briefing,
+          });
+        }
+
+        api.logger.info(`[ax-platform] Injected mission briefing for ${sessionKey}`);
+      });
+      api.logger.info("[ax-platform] Hook registered: before_agent_start");
+    } else if (typeof apiAny.on === "function") {
+      // Fallback: try event emitter pattern
+      apiAny.on("before_agent_start", async (run: any) => {
+        const sessionKey = run.sessionKey;
+        if (!sessionKey?.startsWith("ax-agent-")) return;
+        const session = getDispatchSession(sessionKey);
+        if (!session) return;
+
+        const briefing = buildMissionBriefing(
+          session.agentHandle,
+          session.spaceName,
+          session.senderHandle,
+          session.contextData
+        );
+
+        if (run.systemPrompt !== undefined) {
+          run.systemPrompt = `${briefing}\n\n---\n\n${run.systemPrompt || ""}`;
+        }
+        api.logger.info(`[ax-platform] Injected mission briefing for ${sessionKey}`);
+      });
+      api.logger.info("[ax-platform] Hook registered via event emitter: before_agent_start");
+    } else {
+      api.logger.info("[ax-platform] Hooks: no registration method available (registerHook or on)");
+    }
+
+    // Register HTTP handler for /ax/dispatch
+    const dispatchHandler = createDispatchHandler(api, config);
+    api.registerHttpHandler(dispatchHandler);
+    api.logger.info("[ax-platform] HTTP handler registered: /ax/dispatch");
+
+    api.logger.info("[ax-platform] Plugin loaded successfully");
+  },
+};
+
+export default plugin;

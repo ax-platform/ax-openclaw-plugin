@@ -3,7 +3,7 @@
  * Injects mission briefing into agent bootstrap files
  */
 
-import type { HookHandler } from "moltbot/hooks";
+import type { HookHandler } from "clawdbot/hooks";
 import { buildMissionBriefing } from "../../lib/context.js";
 import { getDispatchSession } from "../../channel/ax-channel.js";
 

@@ -1,23 +1,32 @@
 /**
  * aX Platform Channel Plugin
  *
- * Registers aX as a Moltbot channel for bidirectional messaging.
+ * Registers aX as a Clawdbot channel for bidirectional messaging.
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { PluginRuntime } from "clawdbot/plugin-sdk";
 import type { AxDispatchPayload, AxDispatchResponse, DispatchSession } from "../lib/types.js";
 import { loadAgentRegistry, getAgent, verifySignature, logRegisteredAgents } from "../lib/auth.js";
 import { sendProgressUpdate } from "../lib/api.js";
+import { buildMissionBriefing } from "../lib/context.js";
+
+// Runtime instance (set during plugin registration)
+let runtime: PluginRuntime | null = null;
+
+export function setAxPlatformRuntime(r: PluginRuntime): void {
+  runtime = r;
+}
+
+export function getAxPlatformRuntime(): PluginRuntime {
+  if (!runtime) {
+    throw new Error("aX Platform runtime not initialized");
+  }
+  return runtime;
+}
 
 // Store active dispatch sessions (keyed by sessionKey)
 const dispatchSessions = new Map<string, DispatchSession>();
-
-// Pending response resolvers (for sync-over-async pattern)
-const pendingResponses = new Map<string, {
-  resolve: (response: string) => void;
-  reject: (error: Error) => void;
-  timeout: NodeJS.Timeout;
-}>();
 
 /**
  * Get dispatch session by sessionKey (used by bootstrap hook)
@@ -61,19 +70,11 @@ export function createAxChannel(config: {
     outbound: {
       deliveryMode: "direct",
 
-      // Handle agent responses - route back to aX backend
+      // Handle agent responses - this is called by the dispatcher
       async sendText({ text, sessionKey }: { text: string; sessionKey?: string }) {
-        if (!sessionKey) return { ok: false, error: "No session key" };
-
-        const pending = pendingResponses.get(sessionKey);
-        if (pending) {
-          clearTimeout(pending.timeout);
-          pending.resolve(text);
-          pendingResponses.delete(sessionKey);
-          return { ok: true };
-        }
-
-        return { ok: false, error: "No pending dispatch for session" };
+        // For aX, responses are returned via HTTP response in the dispatch handler
+        // This is a no-op since we use sync-over-async pattern
+        return { ok: true };
       },
     },
 
@@ -85,12 +86,8 @@ export function createAxChannel(config: {
       },
 
       async stop() {
-        // Clean up pending responses
-        for (const [key, pending] of pendingResponses) {
-          clearTimeout(pending.timeout);
-          pending.reject(new Error("Channel stopped"));
-          pendingResponses.delete(key);
-        }
+        // Clean up
+        dispatchSessions.clear();
       },
     },
   };
@@ -100,9 +97,11 @@ export function createAxChannel(config: {
  * Create HTTP handler for /ax/dispatch
  */
 export function createDispatchHandler(
-  api: { logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void } },
-  config: { backendUrl?: string },
-  runAgent: (sessionKey: string, message: string) => Promise<string>
+  api: {
+    logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void };
+    config?: unknown;
+  },
+  config: { backendUrl?: string }
 ) {
   const backendUrl = config.backendUrl || "http://localhost:8001";
 
@@ -132,12 +131,16 @@ export function createDispatchHandler(
 
     try {
       // Read body
+      api.logger.info("[ax-platform] Reading body...");
       const body = await readBody(req);
+      api.logger.info(`[ax-platform] Body received (${body.length} bytes)`);
 
       // Peek agent_id for signature verification
       const agentIdMatch = body.match(/"agent_id"\s*:\s*"([^"]+)"/);
       const agentId = agentIdMatch?.[1];
+      api.logger.info(`[ax-platform] Agent ID: ${agentId?.substring(0, 8)}...`);
       const agent = agentId ? getAgent(agentId) : undefined;
+      api.logger.info(`[ax-platform] Agent found: ${agent ? 'yes' : 'no'}, has secret: ${agent?.secret ? 'yes' : 'no'}`);
 
       // Verify signature if agent has secret
       if (agent?.secret) {
@@ -158,7 +161,7 @@ export function createDispatchHandler(
       const sessionKey = `ax-agent-${payload.agent_id}`;
 
       // Store session context for bootstrap hook
-      dispatchSessions.set(sessionKey, {
+      const session: DispatchSession = {
         dispatchId,
         agentId: payload.agent_id,
         agentHandle: payload.agent_handle || payload.agent_name || "agent",
@@ -169,7 +172,8 @@ export function createDispatchHandler(
         mcpEndpoint: payload.mcp_endpoint,
         contextData: payload.context_data,
         startTime: Date.now(),
-      });
+      };
+      dispatchSessions.set(sessionKey, session);
 
       // Extract message
       const message = payload.user_message || payload.content || "";
@@ -183,8 +187,73 @@ export function createDispatchHandler(
         sendProgressUpdate(backendUrl, payload.auth_token, dispatchId, "processing", "thinking");
       }
 
-      // Run agent and wait for response (sync-over-async)
-      const response = await runAgent(sessionKey, message);
+      // Build context for the agent
+      const missionBriefing = buildMissionBriefing(
+        session.agentHandle,
+        session.spaceName,
+        session.senderHandle,
+        session.contextData
+      );
+
+      // Get runtime for agent execution
+      const runtime = getAxPlatformRuntime();
+
+      // Build context payload (matching BlueBubbles pattern)
+      const ctxPayload = {
+        Body: message,
+        BodyForAgent: message,
+        RawBody: message,
+        CommandBody: message,
+        BodyForCommands: message,
+        From: `ax-platform:${session.senderHandle}`,
+        To: `ax-platform:${session.agentHandle}`,
+        SessionKey: sessionKey,
+        AccountId: "default",
+        ChatType: "direct" as const,
+        ConversationLabel: session.senderHandle,
+        SenderId: session.senderHandle,
+        Provider: "ax-platform",
+        Surface: "ax-platform",
+        OriginatingChannel: "ax-platform",
+        OriginatingTo: `ax-platform:${session.agentHandle}`,
+        WasMentioned: true, // aX dispatches are always mentions
+        CommandAuthorized: true,
+        // aX-specific metadata
+        AxDispatchId: dispatchId,
+        AxSpaceId: session.spaceId,
+        AxSpaceName: session.spaceName,
+        AxAuthToken: session.authToken,
+        AxMcpEndpoint: session.mcpEndpoint,
+        // Mission briefing for context
+        SystemContext: missionBriefing,
+      };
+
+      // Collect response text
+      let responseText = "";
+
+      api.logger.info(`[ax-platform] Calling dispatcher for session ${sessionKey}...`);
+      const startTime = Date.now();
+
+      // Dispatch to agent - this runs the agent and calls deliver() with response
+      await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+        ctx: ctxPayload,
+        cfg: api.config,
+        dispatcherOptions: {
+          deliver: async (deliverPayload: { text?: string; mediaUrls?: string[] }) => {
+            // Collect the agent's response
+            api.logger.info(`[ax-platform] Got response chunk (${deliverPayload.text?.length || 0} chars)`);
+            if (deliverPayload.text) {
+              responseText += deliverPayload.text;
+            }
+          },
+          onError: (err: unknown, info: { kind: string }) => {
+            api.logger.error(`[ax-platform] Agent error (${info.kind}): ${err}`);
+          },
+        },
+      });
+
+      const elapsed = Date.now() - startTime;
+      api.logger.info(`[ax-platform] Dispatcher complete in ${elapsed}ms, response: ${responseText.length} chars`);
 
       // Clean up session
       dispatchSessions.delete(sessionKey);
@@ -193,7 +262,7 @@ export function createDispatchHandler(
       sendJson(res, 200, {
         status: "success",
         dispatch_id: dispatchId,
-        response,
+        response: responseText || "[No response from agent]",
       } satisfies AxDispatchResponse);
 
       return true;

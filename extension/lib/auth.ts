@@ -3,7 +3,13 @@
  */
 
 import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentEntry } from "./types.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Agent registry loaded from config
 let agentRegistry: Map<string, AgentEntry> | null = null;
@@ -16,7 +22,8 @@ export function loadAgentRegistry(agents: AgentEntry[] | undefined): Map<string,
 
   agentRegistry = new Map();
 
-  if (agents) {
+  // 1. Try plugin config first
+  if (agents && Array.isArray(agents)) {
     for (const agent of agents) {
       if (agent.id && agent.secret) {
         agentRegistry.set(agent.id, agent);
@@ -24,7 +31,73 @@ export function loadAgentRegistry(agents: AgentEntry[] | undefined): Map<string,
     }
   }
 
-  // Fallback to env vars for single-agent setup
+  // 2. Fallback: AX_AGENTS env var (JSON array)
+  if (agentRegistry.size === 0 && process.env.AX_AGENTS) {
+    try {
+      const envAgents = JSON.parse(process.env.AX_AGENTS) as AgentEntry[];
+      for (const agent of envAgents) {
+        if (agent.id && agent.secret) {
+          agentRegistry.set(agent.id, agent);
+        }
+      }
+    } catch {
+      // Ignore JSON parse errors
+    }
+  }
+
+  // 3. Fallback: Read from clawdbot.json (try sandbox mount first, then host path)
+  if (agentRegistry.size === 0) {
+    const configPaths = [
+      "/clawdbot-config.json",  // Mounted in sandbox
+      path.join(process.env.HOME || "", ".clawdbot", "clawdbot.json"),  // Host path
+    ];
+    for (const configPath of configPaths) {
+      try {
+        if (fs.existsSync(configPath)) {
+          const content = fs.readFileSync(configPath, "utf-8");
+          const config = JSON.parse(content);
+          const agents = config?.plugins?.entries?.["ax-platform"]?.config?.agents;
+          if (Array.isArray(agents)) {
+            for (const agent of agents) {
+              if (agent.id && agent.secret) {
+                agentRegistry.set(agent.id, agent);
+              }
+            }
+          }
+          if (agentRegistry.size > 0) break;  // Found agents, stop searching
+        }
+      } catch (err) {
+        // Try next path
+      }
+    }
+  }
+
+  // 4. Fallback: Read ax-agents.env file
+  if (agentRegistry.size === 0) {
+    const envFilePath = "/Users/jacob/claude_home/ax-clawdbot/ax-agents.env";
+    try {
+      if (fs.existsSync(envFilePath)) {
+        const content = fs.readFileSync(envFilePath, "utf-8");
+        const lines = content.split("\n");
+        for (const line of lines) {
+          if (line.startsWith("AGENT_") && line.includes("=")) {
+            const value = line.split("=")[1]?.trim();
+            if (value) {
+              const parts = value.split("|");
+              if (parts.length >= 2) {
+                const [id, secret, handle, env] = parts;
+                agentRegistry.set(id, { id, secret, handle, env });
+              }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error("[ax-platform] Error reading ax-agents.env:", err);
+    }
+  }
+
+  // 4. Final fallback: single-agent env vars
   const envId = process.env.AX_AGENT_ID;
   const envSecret = process.env.AX_WEBHOOK_SECRET;
   if (envId && envSecret && !agentRegistry.has(envId)) {
@@ -73,6 +146,9 @@ export function verifySignature(
     .update(payload)
     .digest("hex");
 
+  // Debug logging
+  console.error(`[ax-platform] Signature debug: timestamp=${timestamp}, secret=${secret.substring(0,8)}..., received=${expectedSig.substring(0,16)}..., computed=${computedSig.substring(0,16)}...`);
+
   if (!crypto.timingSafeEqual(Buffer.from(expectedSig), Buffer.from(computedSig))) {
     return { valid: false, error: "Invalid signature" };
   }
@@ -83,9 +159,14 @@ export function verifySignature(
 /**
  * Log registered agents (for startup diagnostics)
  */
-export function logRegisteredAgents(logger: { info: (msg: string) => void }): void {
+export function logRegisteredAgents(logger: { info: (msg: string) => void; error?: (msg: string) => void }): void {
+  // Force reload if empty (in case called before loadAgentRegistry)
   if (!agentRegistry || agentRegistry.size === 0) {
-    logger.info("[ax-platform] No agents configured");
+    loadAgentRegistry(undefined);
+  }
+
+  if (!agentRegistry || agentRegistry.size === 0) {
+    logger.info("[ax-platform] No agents configured (checked config, env vars, and files)");
     return;
   }
 
@@ -93,6 +174,7 @@ export function logRegisteredAgents(logger: { info: (msg: string) => void }): vo
   for (const [id, agent] of agentRegistry) {
     const handle = agent.handle || "(no handle)";
     const env = agent.env || "(no env)";
-    logger.info(`[ax-platform]   ${handle} [${env}] -> ${id.substring(0, 8)}...`);
+    const secretPrefix = agent.secret?.substring(0, 8) || "no-secret";
+    logger.info(`[ax-platform]   ${handle} [${env}] -> ${id.substring(0, 8)}... (secret: ${secretPrefix}...)`);
   }
 }

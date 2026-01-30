@@ -1,131 +1,137 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code when working in this repository.
 
-## Local Documentation
+## Quick Reference
 
-Reference docs are in `docs/` (gitignored). Check there for:
-- Clawdbot plugin SDK documentation
-- aX Platform API reference
-- Webhook payload examples
+```bash
+# After any code or config changes
+./setup.sh sync
 
-External references:
-- [Clawdbot](https://clawdbot.com)
-- [aX Platform](https://paxai.app)
-- [aX Registration](https://paxai.app/register)
+# Watch logs
+./setup.sh logs
+
+# Check status
+./setup.sh status
+```
 
 ## Project Overview
 
-**ax-clawdbot** is a Clawdbot plugin that bridges locally-running Claude agents to the aX Platform cloud collaboration system. Users run their AI agent locally while participating in aX workspaces, receiving @mentions and collaborating with other agents.
+**ax-clawdbot** is a Clawdbot plugin connecting local agents to [aX Platform](https://paxai.app). Users run their AI locally while participating in cloud workspaces via @mentions.
 
-## Development Commands
+## Configuration
 
-```bash
-# Install the extension locally
-cd extension && clawdbot plugins install .
-
-# Restart gateway after changes (runs on host via launchctl)
-launchctl stop com.clawdbot.gateway && launchctl start com.clawdbot.gateway
-
-# Watch logs during development
-tail -f ~/.clawdbot/logs/gateway.log | grep ax-platform
-
-# Test webhook dispatch locally
-curl -X POST http://localhost:18789/ax/dispatch \
-  -H "Content-Type: application/json" \
-  -d '{"dispatch_id":"test","agent_id":"123","agent_handle":"test-agent","user_message":"hello"}'
-```
-
-## Docker Environment
-
-The extension runs in a hybrid Docker setup:
-
-| Component | Location | Notes |
-|-----------|----------|-------|
-| Gateway | Host (launchctl) | Receives webhooks, spawns sandboxes |
-| Backend API | `ax-backend-api:8001` | Docker container |
-| Agent sandboxes | `clawdbot-sbx-ax-agent-{id}` | Per-agent Docker containers |
+**Single source of truth: `ax-agents.env`**
 
 ```bash
-# Check running containers
-docker ps --format "table {{.Names}}\t{{.Status}}" | grep -E "(agent|clawdbot|backend)"
-
-# Check backend logs
-docker logs ax-backend-api --tail 50
-
-# Check agent sandbox logs
-docker logs clawdbot-sbx-ax-agent-{agent_id_prefix} --tail 50
-
-# Gateway logs (on host)
-tail -50 ~/.clawdbot/logs/gateway.log
-tail -20 ~/.clawdbot/logs/gateway.err.log
+# Format: AGENT_N=id|secret|handle|env
+AGENT_1=uuid|secret|@handle|prod
 ```
+
+`setup.sh sync` reads this file and:
+1. Updates `~/.clawdbot/clawdbot.json` plugin config
+2. Removes stale `AX_*` env vars from LaunchAgent plist
+3. Reloads the gateway
+
+**Never edit secrets directly in plist or clawdbot.json** - always use ax-agents.env + setup.sh.
 
 ## Architecture
 
-### Request Flow
-
-1. aX backend POSTs to `/ax/dispatch` with dispatch payload
-2. HMAC signature verified (X-AX-Signature + X-AX-Timestamp headers, 5-min replay window)
-3. Message passed to local Clawdbot via CLI with session routing by `agent_id`
-4. Progress updates POSTed to backend during processing (fire-and-forget)
-5. Response extracted from clawdbot JSON output and returned to backend
-6. Backend posts response back to conversation
+```
+aX Backend → Cloudflare Tunnel → Gateway (host) → Clawdbot Sandbox → Response
+                                    ↓
+                            HMAC signature check
+                            Route by agent_id
+```
 
 ### Key Files
 
-- `extension/index.ts` - Core plugin: HTTP handlers, HMAC verification, MCP client, dispatch processing
-- `extension/plugin.json` - Plugin manifest with config schema
-- `install.sh` - One-liner installer script
+| File | Purpose |
+|------|---------|
+| `extension/index.ts` | Plugin entry: HTTP handlers, dispatch routing |
+| `extension/lib/auth.ts` | Agent registry, HMAC verification |
+| `extension/channel/ax-channel.ts` | aX channel implementation |
+| `setup.sh` | Config management script |
+| `ax-agents.env` | Agent credentials (gitignored) |
 
-### HTTP Endpoints
+### Config Loading Priority
 
-| Path | Method | Purpose |
-|------|--------|---------|
-| `/ax/dispatch` | GET | WebSub verification (hub.challenge echo) |
-| `/ax/dispatch` | POST | Main webhook for receiving/processing messages |
-| `/ax/register` | POST | Self-registration with aX backend |
+The plugin loads agents in this order (first non-empty wins):
+1. `api.config.agents` (from clawdbot.json plugin config)
+2. `process.env.AX_AGENTS` (JSON array)
+3. `/clawdbot-config.json` (sandbox mount)
+4. `~/.clawdbot/clawdbot.json` (direct read)
+5. `ax-agents.env` file
 
-### Session Routing
+**Important**: `setup.sh sync` removes `AX_AGENTS` from the plist to ensure clawdbot.json is used.
 
-Sessions are routed by `agent_id` (not space/sender), allowing persistent memory across all conversations:
-```
-Session ID: ax-agent-{agent_id}
-```
+## Development
 
-### Environment Variables
+```bash
+# Install extension
+cd extension && clawdbot plugins install .
 
-| Variable | Purpose |
-|----------|---------|
-| `AX_AGENTS` | Multi-agent config JSON: `[{"id":"...","secret":"...","handle":"@name","env":"prod"}]` |
-| `AX_WEBHOOK_SECRET` | HMAC secret (single-agent fallback) |
-| `AX_AGENT_ID` | Agent ID (single-agent fallback) |
-| `AX_AUTH_TOKEN` | Bearer token for MCP tool calls (set from dispatch) |
-| `AX_MCP_ENDPOINT` | aX MCP server endpoint (set from dispatch) |
-| `AX_BACKEND_URL` | Backend API for progress updates (default: localhost:8001) |
-| `CLAWDBOT_CMD` | Path to clawdbot binary |
+# Restart after changes
+./setup.sh sync
 
-### Multi-Agent Config Format
+# Watch logs
+tail -f ~/.clawdbot/logs/gateway.log | grep ax-platform
 
-```json
-[
-  {"id": "uuid", "secret": "...", "handle": "@clawdbot", "env": "prod", "url": "https://..."},
-  {"id": "uuid", "secret": "...", "handle": "@clawdbot-dev", "env": "local"}
-]
+# Test locally (no signature)
+curl -X POST http://localhost:18789/ax/dispatch \
+  -H "Content-Type: application/json" \
+  -d '{"dispatch_id":"test","agent_id":"123","user_message":"hello"}'
 ```
 
-On startup, logs show: `[ax-platform] @clawdbot [prod] → e5c6041a...`
+## Troubleshooting
 
-### Multi-text Response Handling
+### Common Issues
 
-Clawdbot CLI can output invalid JSON with duplicate `"text"` keys. The extension uses regex extraction to capture ALL text values before falling back to standard JSON parsing:
-```typescript
-const textRegex = /"text"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| 401 Invalid signature | Stale secrets | Run `./setup.sh sync` |
+| 401 after secret update | Plist has old AX_AGENTS | Run `./setup.sh sync` (cleans plist) |
+| Connection refused | Tunnel dead | Restart cloudflared, update URL in aX |
+| Agent quarantined | 3+ failed dispatches | Fix issue, un-quarantine in aX admin |
+
+### Debug Commands
+
+```bash
+# Check registered agents and secrets
+tail -30 ~/.clawdbot/logs/gateway.log | grep "Registered agents" -A 5
+
+# Check signature verification
+tail -50 ~/.clawdbot/logs/gateway.err.log | grep "Signature debug"
+
+# Check plist for stale env vars (should be empty after sync)
+grep "AX_AGENTS\|AX_AGENT_ID" ~/Library/LaunchAgents/com.clawdbot.gateway.plist
+
+# Current tunnel URL
+grep trycloudflare /tmp/cf-tunnel.log | grep -oE 'https://[^|]+trycloudflare.com'
 ```
 
-## Design Principles
+### Tunnel Management
 
-- **Input/Output Pattern**: Dispatch receives message → processes → returns response. Backend handles posting.
-- **MCP as Auxiliary Tools**: Agent uses MCP for reading context only (spaces, tasks, search), not for posting responses.
-- **Fire-and-forget Progress**: Progress updates don't block dispatch on failures.
-- **"Agents think; Infrastructure acts"**: Agent focuses on processing, backend handles messaging.
+Quick tunnels are ephemeral - URL changes on restart:
+
+```bash
+# Start tunnel
+cloudflared tunnel --url http://localhost:18789 --ha-connections 1 > /tmp/cf-tunnel.log 2>&1 &
+
+# Get URL
+grep trycloudflare /tmp/cf-tunnel.log | grep -oE 'https://[^|]+trycloudflare.com'
+
+# After URL changes: update in aX admin, regenerate secrets if needed
+```
+
+## Reference Docs
+
+Local docs in `docs/` (gitignored):
+- Clawdbot plugin SDK
+- aX Platform API
+- Webhook payload examples
+
+External:
+- [Clawdbot](https://clawdbot.com)
+- [aX Platform](https://paxai.app)
+- [aX Registration](https://paxai.app/register)
