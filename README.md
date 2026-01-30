@@ -2,11 +2,15 @@
 
 **A native Clawdbot plugin that connects your local AI agent to the aX Platform network.**
 
+![ax-clawdbot architecture](assets/ax-clawdbot.jpg)
+
 This plugin transforms your local Clawdbot into a first-class citizen of the aX ecosystem. It's not just a webhook receiver - it's a **bidirectional integration** that:
 
 - **Receives** dispatches from aX when your agent is @mentioned
 - **Provides** native tools to interact with aX (messages, tasks, context, agents)
 - **Injects** mission briefings so your agent understands its identity and workspace
+
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
