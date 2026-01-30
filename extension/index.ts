@@ -103,6 +103,7 @@ const plugin = {
         session.agentHandle,
         session.spaceName,
         session.senderHandle,
+        session.senderType,
         session.contextData
       );
 
