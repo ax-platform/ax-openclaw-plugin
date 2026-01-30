@@ -145,6 +145,20 @@ cmd_sync() {
 
     log_ok "Found $AGENT_COUNT agent(s)"
 
+    # Clean reinstall: remove old extension and clear config entries first
+    log_info "Reinstalling extension..."
+    rm -rf "$EXTENSION_DIR" 2>/dev/null || true
+    # Clear config entries to avoid validation error during install
+    TEMP_CONFIG=$(cat "$CONFIG_FILE" | jq 'del(.plugins.entries["ax-platform"]) | del(.plugins.installs["ax-platform"])')
+    echo "$TEMP_CONFIG" > "$CONFIG_FILE"
+    cd "$SCRIPT_DIR/extension"
+    if clawdbot plugins install . 2>&1 | grep -v "^\\[" | head -5; then
+        log_ok "Extension installed"
+    else
+        log_warn "Extension install had warnings (check logs)"
+    fi
+    cd "$SCRIPT_DIR"
+
     log_info "Updating clawdbot.json..."
     UPDATED_CONFIG=$(cat "$CONFIG_FILE" | jq --argjson agents "$AGENTS_JSON" '
         .plugins.entries["ax-platform"].enabled = true |
@@ -153,15 +167,6 @@ cmd_sync() {
     ')
     echo "$UPDATED_CONFIG" > "$CONFIG_FILE"
     log_ok "Updated plugin config"
-
-    log_info "Reinstalling extension..."
-    cd "$SCRIPT_DIR/extension"
-    if clawdbot plugins install . 2>&1 | grep -v "^\\[" | head -5; then
-        log_ok "Extension installed"
-    else
-        log_warn "Extension install had warnings (check logs)"
-    fi
-    cd "$SCRIPT_DIR"
 
     # Clean stale env vars from plist (prevents signature verification failures)
     if clean_plist_env; then
