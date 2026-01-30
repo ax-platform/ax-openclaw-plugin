@@ -229,7 +229,7 @@ export function createDispatchHandler(
         SessionKey: sessionKey,
         AccountId: "default",
         ChatType: "direct" as const,
-        ConversationLabel: session.senderHandle,
+        ConversationLabel: session.agentHandle,
         SenderId: session.senderHandle,
         Provider: "ax-platform",
         Surface: "ax-platform",
