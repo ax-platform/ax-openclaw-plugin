@@ -72,9 +72,9 @@ export function loadAgentRegistry(agents: AgentEntry[] | undefined): Map<string,
     }
   }
 
-  // 4. Fallback: Read ax-agents.env file
+  // 4. Fallback: Read ax-agents.env file (relative to extension root)
   if (agentRegistry.size === 0) {
-    const envFilePath = "/Users/jacob/claude_home/ax-clawdbot/ax-agents.env";
+    const envFilePath = path.join(__dirname, "..", "..", "ax-agents.env");
     try {
       if (fs.existsSync(envFilePath)) {
         const content = fs.readFileSync(envFilePath, "utf-8");
@@ -95,13 +95,6 @@ export function loadAgentRegistry(agents: AgentEntry[] | undefined): Map<string,
     } catch (err) {
       console.error("[ax-platform] Error reading ax-agents.env:", err);
     }
-  }
-
-  // 4. Final fallback: single-agent env vars
-  const envId = process.env.AX_AGENT_ID;
-  const envSecret = process.env.AX_WEBHOOK_SECRET;
-  if (envId && envSecret && !agentRegistry.has(envId)) {
-    agentRegistry.set(envId, { id: envId, secret: envSecret, env: "default" });
   }
 
   return agentRegistry;
@@ -149,7 +142,9 @@ export function verifySignature(
   // Debug logging
   console.error(`[ax-platform] Signature debug: timestamp=${timestamp}, secret=${secret.substring(0,8)}..., received=${expectedSig.substring(0,16)}..., computed=${computedSig.substring(0,16)}...`);
 
-  if (!crypto.timingSafeEqual(Buffer.from(expectedSig), Buffer.from(computedSig))) {
+  // Length check required before timingSafeEqual (throws RangeError if lengths differ)
+  if (expectedSig.length !== computedSig.length ||
+      !crypto.timingSafeEqual(Buffer.from(expectedSig), Buffer.from(computedSig))) {
     return { valid: false, error: "Invalid signature" };
   }
 
