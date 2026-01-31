@@ -88,14 +88,16 @@ const plugin = {
     // Returns { prependContext: "..." } to inject into agent context
     api.on("before_agent_start", async (event: any) => {
       const sessionKey = event.sessionKey;
+      // Check for aX session
       if (!sessionKey?.startsWith("ax-agent-")) {
         return; // Not an aX session
       }
 
+      // Look up dispatch context by sessionKey (searches all active dispatches)
       const session = getDispatchSession(sessionKey);
       if (!session) {
-        api.logger.warn(`[ax-platform] No session found for ${sessionKey}`);
-        return; // No context available
+        api.logger.warn(`[ax-platform] No active dispatch found for session ${sessionKey}`);
+        return; // No context available (dispatch may have completed)
       }
 
       // Build mission briefing with agent identity

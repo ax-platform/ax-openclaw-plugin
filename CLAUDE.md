@@ -37,11 +37,28 @@ AGENT_1=uuid|secret|@handle|prod
 
 ## Architecture
 
+### Network Topology (Important!)
+
+There are THREE deployment scenarios with different networking:
+
+| aX Backend | Gateway Location | Webhook URL | Tunnel Needed? |
+|------------|------------------|-------------|----------------|
+| **Local Docker** | Local machine | `http://host.docker.internal:18789/ax/dispatch` | NO |
+| **Production (paxai.app)** | Local machine | `https://xxx.trycloudflare.com/ax/dispatch` | YES |
+| **Production (paxai.app)** | Cloudflare Workers | `https://ax-moltworker.xxx.workers.dev/ax/dispatch` | NO |
+
+**Key insight:**
+- Local aX (Docker) → Local Gateway: Uses `host.docker.internal` to reach host machine. No tunnel.
+- Production aX → Local Gateway: Needs Cloudflare tunnel because GCP can't reach localhost.
+- Production aX → Cloudflare Workers: Both on public internet. No tunnel.
+
+### Request Flow
+
 ```
-aX Backend → Cloudflare Tunnel → Gateway (host) → Clawdbot Sandbox → Response
-                                    ↓
-                            HMAC signature check
-                            Route by agent_id
+aX Backend → [Tunnel if needed] → Gateway (host) → Clawdbot Sandbox → Response
+                                       ↓
+                               HMAC signature check
+                               Route by agent_id
 ```
 
 ### Key Files
@@ -112,10 +129,16 @@ grep trycloudflare /tmp/cf-tunnel.log | grep -oE 'https://[^|]+trycloudflare.com
 
 ### Tunnel Management
 
+**Only needed when:** Production aX (paxai.app) → Local gateway
+
+**NOT needed when:**
+- Local aX (Docker) → Local gateway (use `host.docker.internal`)
+- Production aX → Cloudflare Workers (public URL)
+
 Quick tunnels are ephemeral - URL changes on restart:
 
 ```bash
-# Start tunnel
+# Start tunnel (only for production aX → local gateway)
 cloudflared tunnel --url http://localhost:18789 --ha-connections 1 > /tmp/cf-tunnel.log 2>&1 &
 
 # Get URL

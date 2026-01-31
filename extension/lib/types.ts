@@ -70,6 +70,7 @@ export interface AxDispatchResponse {
 // Session context stored per dispatch
 export interface DispatchSession {
   dispatchId: string;
+  sessionKey: string; // Conversation session key (for continuity)
   agentId: string;
   agentHandle: string;
   spaceId: string;
