@@ -94,11 +94,18 @@ function stopPeriodicCleanup(): void {
   }
 }
 
+// Backend timeout is 10 minutes - if we've been processing longer, it's a timeout
+const BACKEND_TIMEOUT_MS = 10 * 60 * 1000;
+
 /**
  * Check dispatch state for deduplication
- * Returns: "new" | "in_progress" | "completed"
+ * Returns: "new" | "in_progress" | "timed_out" | "completed"
  */
-function checkDispatchState(dispatchId: string): { status: "new" | "in_progress" | "completed"; response?: string } {
+function checkDispatchState(dispatchId: string): {
+  status: "new" | "in_progress" | "timed_out" | "completed";
+  response?: string;
+  elapsedMs?: number;
+} {
   const state = dispatchStates.get(dispatchId);
 
   if (!state) {
@@ -108,7 +115,12 @@ function checkDispatchState(dispatchId: string): { status: "new" | "in_progress"
   }
 
   if (state.status === "in_progress") {
-    return { status: "in_progress" };
+    const elapsedMs = Date.now() - state.startedAt;
+    // If we've exceeded the backend timeout, this is a timeout situation
+    if (elapsedMs >= BACKEND_TIMEOUT_MS) {
+      return { status: "timed_out", elapsedMs };
+    }
+    return { status: "in_progress", elapsedMs };
   }
 
   // Completed - return cached response
@@ -294,11 +306,23 @@ export function createDispatchHandler(
       const dispatchState = checkDispatchState(dispatchId);
       if (dispatchState.status === "in_progress") {
         // Retry arrived while still processing - agent is working on it
-        api.logger.warn(`[ax-platform] Dispatch ${dispatchId} still in progress - retry ignored`);
+        const elapsedMin = Math.floor((dispatchState.elapsedMs || 0) / 60000);
+        api.logger.warn(`[ax-platform] Dispatch ${dispatchId} still in progress (${elapsedMin}m) - asking backend to wait`);
         sendJson(res, 200, {
           status: "success",
           dispatch_id: dispatchId,
-          response: "[Agent still processing previous request]",
+          response: `[Agent still processing - ${elapsedMin}m elapsed, please wait]`,
+        } satisfies AxDispatchResponse);
+        return true;
+      }
+      if (dispatchState.status === "timed_out") {
+        // Been processing too long - this is a timeout
+        const elapsedMin = Math.floor((dispatchState.elapsedMs || 0) / 60000);
+        api.logger.error(`[ax-platform] Dispatch ${dispatchId} timed out after ${elapsedMin}m`);
+        sendJson(res, 200, {
+          status: "success",
+          dispatch_id: dispatchId,
+          response: `[Request timed out after ${elapsedMin} minutes - agent may still be working but exceeded time limit]`,
         } satisfies AxDispatchResponse);
         return true;
       }

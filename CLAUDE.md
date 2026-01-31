@@ -15,6 +15,23 @@ Guidance for Claude Code when working with the **aX Platform Plugin for Clawdbot
 ./setup.sh status
 ```
 
+## IMPORTANT: Rebuild After Code Changes
+
+**After modifying any TypeScript files in `extension/`, you MUST rebuild and restart:**
+
+```bash
+./setup.sh sync
+```
+
+This copies the updated code to `~/.clawdbot/extensions/ax-platform/` and restarts the gateway.
+
+**Without this step, your code changes will NOT take effect!**
+
+Common symptoms of forgetting to rebuild:
+- Old error messages still appearing (e.g., "[Duplicate dispatch - already processed]" instead of new message)
+- New logging not showing up
+- Bug fixes not working
+
 ## Project Overview
 
 **ax-clawdbot** is a Clawdbot plugin connecting local agents to [aX Platform](https://paxai.app). Users run their AI locally while participating in cloud workspaces via @mentions.
