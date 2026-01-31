@@ -94,8 +94,9 @@ function stopPeriodicCleanup(): void {
   }
 }
 
-// Backend timeout is 10 minutes - if we've been processing longer, it's a timeout
-const BACKEND_TIMEOUT_MS = 10 * 60 * 1000;
+// Backend timeout threshold - after this many retries have likely failed, say "timed out"
+// Backend default is 30s with 5 retries = ~2.5 min total before giving up
+const BACKEND_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
 
 /**
  * Check dispatch state for deduplication
