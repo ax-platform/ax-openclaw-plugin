@@ -423,9 +423,9 @@ export function createDispatchHandler(
       } else if (lastError) {
         finalResponse = `[Agent error: ${lastError}]`;
       } else if (deliverCallCount === 0) {
-        // Agent completed but nothing to deliver - likely NO_REPLY (silent response)
-        // This is valid behavior - the agent chose not to respond
-        finalResponse = "";  // Empty response = agent chose silence
+        // Agent completed but nothing to deliver - NO_REPLY (intentional silence)
+        // This is valid Clawdbot behavior - the agent chose not to respond
+        finalResponse = "[Agent chose not to respond]";
       } else {
         finalResponse = "[No response from agent]";
       }
