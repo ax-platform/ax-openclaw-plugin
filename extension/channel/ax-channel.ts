@@ -25,14 +25,61 @@ export function getAxPlatformRuntime(): PluginRuntime {
   return runtime;
 }
 
-// Store active dispatch sessions (keyed by sessionKey)
+// Store active dispatch sessions - keyed by dispatchId (not sessionKey!)
+// This allows multiple concurrent dispatches without overwriting each other
 const dispatchSessions = new Map<string, DispatchSession>();
 
+// Deduplication: track recently processed dispatch IDs (TTL-based)
+// Prevents duplicate processing when aX backend retries due to timeout
+const processedDispatches = new Map<string, number>(); // dispatchId -> timestamp
+const DEDUP_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
 /**
- * Get dispatch session by sessionKey (used by bootstrap hook)
+ * Check if dispatch was recently processed (deduplication)
+ */
+function isDuplicateDispatch(dispatchId: string): boolean {
+  const now = Date.now();
+
+  // Clean up expired entries (simple cleanup on each check)
+  for (const [id, timestamp] of processedDispatches) {
+    if (now - timestamp > DEDUP_TTL_MS) {
+      processedDispatches.delete(id);
+    }
+  }
+
+  // Check if this dispatch was recently processed
+  if (processedDispatches.has(dispatchId)) {
+    return true;
+  }
+
+  // Mark as processed
+  processedDispatches.set(dispatchId, now);
+  return false;
+}
+
+/**
+ * Get dispatch session by dispatchId (primary method - used by tools via context.AxDispatchId)
+ */
+export function getDispatchSessionById(dispatchId: string): DispatchSession | undefined {
+  return dispatchSessions.get(dispatchId);
+}
+
+/**
+ * Get dispatch session by sessionKey (legacy - tries to find by sessionKey stored in session)
+ * Falls back to searching all sessions for a match
  */
 export function getDispatchSession(sessionKey: string): DispatchSession | undefined {
-  return dispatchSessions.get(sessionKey);
+  // Direct lookup by dispatchId if sessionKey looks like a dispatchId
+  if (dispatchSessions.has(sessionKey)) {
+    return dispatchSessions.get(sessionKey);
+  }
+  // Search for session with matching sessionKey
+  for (const session of dispatchSessions.values()) {
+    if (session.sessionKey === sessionKey) {
+      return session;
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -170,11 +217,28 @@ export function createDispatchHandler(
       // Parse payload
       const payload = JSON.parse(body) as AxDispatchPayload;
       const dispatchId = payload.dispatch_id || `ext-${Date.now()}`;
-      const sessionKey = `ax-agent-${payload.agent_id}`;
 
-      // Store session context for bootstrap hook
+      // Deduplication check - reject if we've recently processed this dispatch
+      if (isDuplicateDispatch(dispatchId)) {
+        api.logger.warn(`[ax-platform] Duplicate dispatch rejected: ${dispatchId}`);
+        sendJson(res, 200, {
+          status: "success",
+          dispatch_id: dispatchId,
+          response: "[Duplicate dispatch - already processed]",
+        } satisfies AxDispatchResponse);
+        return true;
+      }
+
+      // Session key for CONVERSATION CONTINUITY - based on agent + space
+      // This ensures messages to the same agent in the same space share history
+      const spaceId = payload.space_id || "default";
+      const sessionKey = `ax-agent-${payload.agent_id}-${spaceId}`;
+
+      // Store session context for hooks/tools - keyed by dispatchId (not sessionKey!)
+      // This prevents concurrent dispatches from overwriting each other's context
       const session: DispatchSession = {
         dispatchId,
+        sessionKey, // Store for reverse lookup
         agentId: payload.agent_id,
         agentHandle: payload.agent_handle || payload.agent_name || "agent",
         spaceId: payload.space_id || "",
@@ -187,7 +251,8 @@ export function createDispatchHandler(
         startTime: Date.now(),
       };
       api.logger.info(`[ax-platform] Sender: @${session.senderHandle} (type: ${session.senderType || 'undefined'})`);
-      dispatchSessions.set(sessionKey, session);
+      // Store by dispatchId so concurrent dispatches don't overwrite each other
+      dispatchSessions.set(dispatchId, session);
 
       // Extract message
       const message = payload.user_message || payload.content || "";
@@ -282,8 +347,8 @@ export function createDispatchHandler(
         api.logger.warn(`[ax-platform] WARNING: Empty response after ${elapsed}ms and ${deliverCallCount} deliver() calls`);
       }
 
-      // Clean up session
-      dispatchSessions.delete(sessionKey);
+      // Clean up dispatch context (keyed by dispatchId)
+      dispatchSessions.delete(dispatchId);
 
       // Return response
       const finalResponse = responseText || "[No response from agent]";
