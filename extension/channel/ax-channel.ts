@@ -2,6 +2,22 @@
  * aX Platform Channel Plugin
  *
  * Registers aX as a Clawdbot channel for bidirectional messaging.
+ *
+ * Session Management Strategy:
+ *
+ * 1. sessionKey: `ax-agent-{agent_id}-{space_id}`
+ *    - Purpose: Conversation continuity within a space
+ *    - Used by: Clawdbot dispatcher for message history
+ *    - Lifetime: Persists across multiple dispatches
+ *
+ * 2. dispatchId: Unique per webhook request
+ *    - Purpose: Isolate concurrent dispatch contexts (auth tokens, MCP endpoint)
+ *    - Used by: Tools/hooks to access dispatch-specific metadata
+ *    - Lifetime: Deleted shortly after dispatch completes (with grace period)
+ *
+ * This dual-key strategy prevents session context collisions when multiple
+ * dispatches arrive concurrently for the same agent, while maintaining
+ * conversation continuity across messages.
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -10,6 +26,12 @@ import type { AxDispatchPayload, AxDispatchResponse, DispatchSession } from "../
 import { loadAgentRegistry, getAgent, verifySignature, logRegisteredAgents } from "../lib/auth.js";
 import { sendProgressUpdate } from "../lib/api.js";
 import { buildMissionBriefing } from "../lib/context.js";
+
+// Constants
+const DEDUP_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const DEDUP_CLEANUP_INTERVAL_MS = 60 * 1000; // Clean up every minute
+const SESSION_CLEANUP_DELAY_MS = 1000; // Grace period before session cleanup
+const LOG_PREVIEW_LENGTH = 100; // Max chars to show in log previews
 
 // Runtime instance (set during plugin registration)
 let runtime: PluginRuntime | null = null;
@@ -29,31 +51,53 @@ export function getAxPlatformRuntime(): PluginRuntime {
 // This allows multiple concurrent dispatches without overwriting each other
 const dispatchSessions = new Map<string, DispatchSession>();
 
+// Secondary index: sessionKey -> dispatchId for O(1) lookup
+const sessionKeyIndex = new Map<string, string>();
+
 // Deduplication: track recently processed dispatch IDs (TTL-based)
 // Prevents duplicate processing when aX backend retries due to timeout
 const processedDispatches = new Map<string, number>(); // dispatchId -> timestamp
-const DEDUP_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+// Periodic cleanup interval handle (for proper shutdown)
+let cleanupIntervalHandle: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Start periodic cleanup of expired deduplication entries
+ * Prevents memory leak during low-traffic periods
+ */
+function startPeriodicCleanup(): void {
+  if (cleanupIntervalHandle) return; // Already running
+  cleanupIntervalHandle = setInterval(() => {
+    const now = Date.now();
+    for (const [id, timestamp] of processedDispatches) {
+      if (now - timestamp > DEDUP_TTL_MS) {
+        processedDispatches.delete(id);
+      }
+    }
+  }, DEDUP_CLEANUP_INTERVAL_MS);
+}
+
+/**
+ * Stop periodic cleanup (called on gateway stop)
+ */
+function stopPeriodicCleanup(): void {
+  if (cleanupIntervalHandle) {
+    clearInterval(cleanupIntervalHandle);
+    cleanupIntervalHandle = null;
+  }
+}
 
 /**
  * Check if dispatch was recently processed (deduplication)
  */
 function isDuplicateDispatch(dispatchId: string): boolean {
-  const now = Date.now();
-
-  // Clean up expired entries (simple cleanup on each check)
-  for (const [id, timestamp] of processedDispatches) {
-    if (now - timestamp > DEDUP_TTL_MS) {
-      processedDispatches.delete(id);
-    }
-  }
-
   // Check if this dispatch was recently processed
   if (processedDispatches.has(dispatchId)) {
     return true;
   }
 
   // Mark as processed
-  processedDispatches.set(dispatchId, now);
+  processedDispatches.set(dispatchId, Date.now());
   return false;
 }
 
@@ -65,19 +109,18 @@ export function getDispatchSessionById(dispatchId: string): DispatchSession | un
 }
 
 /**
- * Get dispatch session by sessionKey (legacy - tries to find by sessionKey stored in session)
- * Falls back to searching all sessions for a match
+ * Get dispatch session by sessionKey (for hooks that only have sessionKey)
+ * Uses secondary index for O(1) lookup instead of iterating all sessions
  */
 export function getDispatchSession(sessionKey: string): DispatchSession | undefined {
-  // Direct lookup by dispatchId if sessionKey looks like a dispatchId
+  // Direct lookup by dispatchId if the key is actually a dispatchId
   if (dispatchSessions.has(sessionKey)) {
     return dispatchSessions.get(sessionKey);
   }
-  // Search for session with matching sessionKey
-  for (const session of dispatchSessions.values()) {
-    if (session.sessionKey === sessionKey) {
-      return session;
-    }
+  // Use secondary index for sessionKey -> dispatchId lookup
+  const dispatchId = sessionKeyIndex.get(sessionKey);
+  if (dispatchId) {
+    return dispatchSessions.get(dispatchId);
   }
   return undefined;
 }
@@ -129,12 +172,16 @@ export function createAxChannel(config: {
     gateway: {
       async start(api: { logger: { info: (msg: string) => void } }) {
         logRegisteredAgents(api.logger);
+        startPeriodicCleanup();
         api.logger.info("[ax-platform] Channel started");
       },
 
       async stop() {
-        // Clean up
+        // Clean up all state
+        stopPeriodicCleanup();
         dispatchSessions.clear();
+        sessionKeyIndex.clear();
+        processedDispatches.clear();
       },
     },
   };
@@ -250,9 +297,11 @@ export function createDispatchHandler(
         contextData: payload.context_data,
         startTime: Date.now(),
       };
-      api.logger.info(`[ax-platform] Sender: @${session.senderHandle} (type: ${session.senderType || 'undefined'})`);
+      api.logger.info(`[ax-platform] Sender: @${session.senderHandle} (type: ${session.senderType ?? 'unknown'})`);
       // Store by dispatchId so concurrent dispatches don't overwrite each other
       dispatchSessions.set(dispatchId, session);
+      // Maintain secondary index for sessionKey -> dispatchId lookup
+      sessionKeyIndex.set(sessionKey, dispatchId);
 
       // Extract message
       const message = payload.user_message || payload.content || "";
@@ -347,12 +396,15 @@ export function createDispatchHandler(
         api.logger.warn(`[ax-platform] WARNING: Empty response after ${elapsed}ms and ${deliverCallCount} deliver() calls`);
       }
 
-      // Clean up dispatch context (keyed by dispatchId)
-      dispatchSessions.delete(dispatchId);
+      // Clean up dispatch context after a grace period (allows hooks/tools to complete)
+      setTimeout(() => {
+        dispatchSessions.delete(dispatchId);
+        sessionKeyIndex.delete(sessionKey);
+      }, SESSION_CLEANUP_DELAY_MS);
 
       // Return response
       const finalResponse = responseText || "[No response from agent]";
-      api.logger.info(`[ax-platform] Sending: ${finalResponse.substring(0, 100)}${finalResponse.length > 100 ? '...' : ''}`);
+      api.logger.info(`[ax-platform] Sending: ${finalResponse.substring(0, LOG_PREVIEW_LENGTH)}${finalResponse.length > LOG_PREVIEW_LENGTH ? '...' : ''}`);
       sendJson(res, 200, {
         status: "success",
         dispatch_id: dispatchId,
