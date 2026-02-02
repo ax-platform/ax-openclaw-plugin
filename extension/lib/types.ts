@@ -77,10 +77,11 @@ export interface AgentEntry {
 
 // Dispatch response to backend
 export interface AxDispatchResponse {
-  status: "success" | "error";
+  status: "success" | "error" | "accepted";
   dispatch_id: string;
   response?: string;
   error?: string;
+  mode?: "sync" | "async";
 }
 
 // Session context stored per dispatch

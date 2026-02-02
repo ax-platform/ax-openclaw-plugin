@@ -177,6 +177,11 @@ async function sendHeartbeat(
       if (response.ok) {
         return true;
       }
+      // Auth failures - abort retries immediately
+      if (response.status === 401 || response.status === 403) {
+        logger.error(`[ax-platform] Heartbeat auth failed (${response.status}) - aborting retries`);
+        return false;
+      }
       logger.error(`[ax-platform] Heartbeat failed (attempt ${attempt}): ${response.status} ${response.statusText}`);
     } catch (err) {
       logger.error(`[ax-platform] Heartbeat error (attempt ${attempt}): ${err}`);
@@ -223,6 +228,11 @@ async function sendCompletion(
         logger.info(`[ax-platform] Completion callback sent successfully`);
         return true;
       }
+      // Auth failures - abort retries immediately
+      if (response.status === 401 || response.status === 403) {
+        logger.error(`[ax-platform] Completion callback auth failed (${response.status}) - aborting retries`);
+        return false;
+      }
       logger.error(`[ax-platform] Completion callback failed (attempt ${attempt}): ${response.status} ${response.statusText}`);
     } catch (err) {
       logger.error(`[ax-platform] Completion callback error (attempt ${attempt}): ${err}`);
@@ -255,31 +265,35 @@ async function processDispatchAsync(
 
   api.logger.info(`[ax-platform] ASYNC: Starting background processing for ${dispatchId.substring(0, 8)}`);
 
-  // Start heartbeat timer
+  // Heartbeat timer - initialized inside try block to ensure cleanup on any error
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let heartbeatCount = 0;
-  const heartbeatTimer = setInterval(async () => {
-    heartbeatCount++;
-    const elapsedMs = Date.now() - startTime;
-    api.logger.info(`[ax-platform] ASYNC: Sending heartbeat #${heartbeatCount} (${Math.round(elapsedMs / 1000)}s elapsed)`);
 
-    if (payload.heartbeat_url && payload.callback_api_key) {
-      await sendHeartbeat(
-        payload.heartbeat_url,
-        payload.callback_api_key,
-        {
-          agent_name: session.agentHandle,
-          agent_id: session.agentId,
-          org_id: session.spaceId,
-          message_id: payload.message_id,
-          progress: `Processing... (${Math.round(elapsedMs / 1000)}s)`,
-          elapsed_ms: elapsedMs,
-        },
-        api.logger
-      );
-    }
-  }, HEARTBEAT_INTERVAL_MS);
+  try {
+    // Start heartbeat timer
+    heartbeatTimer = setInterval(async () => {
+      heartbeatCount++;
+      const elapsedMs = Date.now() - startTime;
+      api.logger.info(`[ax-platform] ASYNC: Sending heartbeat #${heartbeatCount} (${Math.round(elapsedMs / 1000)}s elapsed)`);
 
-  // Build context for the agent
+      if (payload.heartbeat_url && payload.callback_api_key) {
+        await sendHeartbeat(
+          payload.heartbeat_url,
+          payload.callback_api_key,
+          {
+            agent_name: session.agentHandle,
+            agent_id: session.agentId,
+            org_id: session.spaceId,
+            message_id: payload.message_id,
+            progress: `Processing... (${Math.round(elapsedMs / 1000)}s)`,
+            elapsed_ms: elapsedMs,
+          },
+          api.logger
+        );
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+
+    // Build context for the agent
   const missionBriefing = buildMissionBriefing(
     session.agentHandle,
     session.spaceName,
@@ -317,87 +331,90 @@ async function processDispatchAsync(
     SystemContext: missionBriefing,
   };
 
-  // Collect response
-  let responseText = "";
-  let deliverCallCount = 0;
-  let lastError: string | null = null;
+    // Collect response
+    let responseText = "";
+    let deliverCallCount = 0;
+    let lastError: string | null = null;
 
-  try {
     const runtime = getAxPlatformRuntime();
 
     // Dispatch to agent
-    await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
-      ctx: ctxPayload,
-      cfg: api.config,
-      dispatcherOptions: {
-        deliver: async (deliverPayload: { text?: string; mediaUrls?: string[] }) => {
-          deliverCallCount++;
-          if (deliverPayload.text) {
-            responseText += deliverPayload.text;
-          }
+    try {
+      await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+        ctx: ctxPayload,
+        cfg: api.config,
+        dispatcherOptions: {
+          deliver: async (deliverPayload: { text?: string; mediaUrls?: string[] }) => {
+            deliverCallCount++;
+            if (deliverPayload.text) {
+              responseText += deliverPayload.text;
+            }
+          },
+          onError: (err: unknown, info: { kind: string }) => {
+            api.logger.error(`[ax-platform] ASYNC: Agent error (${info.kind}): ${err}`);
+            lastError = `${info.kind}: ${err}`;
+          },
         },
-        onError: (err: unknown, info: { kind: string }) => {
-          api.logger.error(`[ax-platform] ASYNC: Agent error (${info.kind}): ${err}`);
-          lastError = `${info.kind}: ${err}`;
+      });
+    } catch (err) {
+      api.logger.error(`[ax-platform] ASYNC: Dispatch error: ${err}`);
+      lastError = String(err);
+    }
+
+    const elapsed = Date.now() - startTime;
+    api.logger.info(`[ax-platform] ASYNC: Processing complete in ${elapsed}ms, deliver calls: ${deliverCallCount}, response: ${responseText.length} chars`);
+
+    // Determine final response
+    let finalResponse: string;
+    let completionStatus: "success" | "failed" = "success";
+
+    if (responseText) {
+      finalResponse = responseText;
+    } else if (lastError) {
+      finalResponse = `[Agent error: ${lastError}]`;
+      completionStatus = "failed";
+    } else if (deliverCallCount === 0) {
+      finalResponse = "[Agent chose not to respond]";
+    } else {
+      finalResponse = "[No response from agent]";
+    }
+
+    // Mark dispatch as completed
+    markDispatchCompleted(dispatchId, finalResponse);
+
+    // Send completion callback
+    if (payload.callback_url && payload.callback_api_key) {
+      api.logger.info(`[ax-platform] ASYNC: Sending completion callback`);
+      await sendCompletion(
+        payload.callback_url,
+        payload.callback_api_key,
+        {
+          agent_name: payload.agent_name || payload.agent_handle,
+          agent_id: payload.agent_id,
+          org_id: payload.org_id,
+          message_id: payload.message_id,
+          completion_status: completionStatus,
+          response: finalResponse,
+          error: lastError || undefined,
+          elapsed_ms: elapsed,
         },
-      },
-    });
-  } catch (err) {
-    api.logger.error(`[ax-platform] ASYNC: Dispatch error: ${err}`);
-    lastError = String(err);
+        api.logger
+      );
+    } else {
+      api.logger.warn(`[ax-platform] ASYNC: CRITICAL - No callback_url or callback_api_key, response will be lost!`);
+    }
+
+    // Clean up session
+    setTimeout(() => {
+      dispatchSessions.delete(dispatchId);
+      sessionKeyIndex.delete(sessionKey);
+    }, SESSION_CLEANUP_DELAY_MS);
   } finally {
-    // Stop heartbeat timer
-    clearInterval(heartbeatTimer);
+    // Always clean up heartbeat timer, even if errors occurred during context building
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+    }
   }
-
-  const elapsed = Date.now() - startTime;
-  api.logger.info(`[ax-platform] ASYNC: Processing complete in ${elapsed}ms, deliver calls: ${deliverCallCount}, response: ${responseText.length} chars`);
-
-  // Determine final response
-  let finalResponse: string;
-  let completionStatus: "success" | "failed" = "success";
-
-  if (responseText) {
-    finalResponse = responseText;
-  } else if (lastError) {
-    finalResponse = `[Agent error: ${lastError}]`;
-    completionStatus = "failed";
-  } else if (deliverCallCount === 0) {
-    finalResponse = "[Agent chose not to respond]";
-  } else {
-    finalResponse = "[No response from agent]";
-  }
-
-  // Mark dispatch as completed
-  markDispatchCompleted(dispatchId, finalResponse);
-
-  // Send completion callback
-  if (payload.callback_url && payload.callback_api_key) {
-    api.logger.info(`[ax-platform] ASYNC: Sending completion callback`);
-    await sendCompletion(
-      payload.callback_url,
-      payload.callback_api_key,
-      {
-        agent_name: payload.agent_name || payload.agent_handle,
-        agent_id: payload.agent_id,
-        org_id: payload.org_id,
-        message_id: payload.message_id,
-        completion_status: completionStatus,
-        response: finalResponse,
-        error: lastError || undefined,
-        elapsed_ms: elapsed,
-      },
-      api.logger
-    );
-  } else {
-    api.logger.warn(`[ax-platform] ASYNC: No callback_url or callback_api_key, response may be lost!`);
-  }
-
-  // Clean up session
-  setTimeout(() => {
-    dispatchSessions.delete(dispatchId);
-    sessionKeyIndex.delete(sessionKey);
-  }, SESSION_CLEANUP_DELAY_MS);
 }
 
 /**
@@ -681,6 +698,23 @@ export function createDispatchHandler(
           backendUrl
         ).catch(err => {
           api.logger.error(`[ax-platform] Async dispatch failed: ${err}`);
+          // Mark as completed to prevent infinite retries
+          markDispatchCompleted(dispatchId, `[System error: ${err}]`);
+          // Attempt to send failure callback
+          if (payload.callback_url && payload.callback_api_key) {
+            sendCompletion(
+              payload.callback_url,
+              payload.callback_api_key,
+              {
+                agent_id: payload.agent_id,
+                completion_status: "failed",
+                error: String(err),
+              },
+              api.logger
+            ).catch(callbackErr => {
+              api.logger.error(`[ax-platform] Failed to send error callback: ${callbackErr}`);
+            });
+          }
         });
 
         return true;
