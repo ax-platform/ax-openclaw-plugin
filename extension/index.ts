@@ -17,11 +17,7 @@ import { axTasksTool } from "./tools/ax-tasks.js";
 import { axContextTool } from "./tools/ax-context.js";
 import { axAgentsTool } from "./tools/ax-agents.js";
 import { axThreadTool } from "./tools/ax-thread.js";
-import { axDiagnosticsTool } from "./tools/ax-diagnostics.js";
-import { axMCPTool } from "./tools/ax-mcp.js";
 import { buildMissionBriefing } from "./lib/context.js";
-import { exportMetrics } from "./lib/metrics.js";
-import type { IncomingMessage, ServerResponse } from "node:http";
 
 interface AxPlatformConfig {
   agents?: Array<{
@@ -87,9 +83,7 @@ const plugin = {
     api.registerTool(axContextTool, { optional: true });
     api.registerTool(axAgentsTool, { optional: true });
     api.registerTool(axThreadTool, { optional: true });
-    api.registerTool(axDiagnosticsTool, { optional: true });
-    api.registerTool(axMCPTool, { optional: true });
-    api.logger.info("[ax-platform] Tools registered: ax_messages, ax_tasks, ax_context, ax_agents, ax_thread, ax_diagnostics, ax_mcp");
+    api.logger.info("[ax-platform] Tools registered: ax_messages, ax_tasks, ax_context, ax_agents, ax_thread");
 
     // Register before_agent_start hook for context injection
     // Uses api.on() event pattern (like memory-lancedb plugin)
@@ -130,20 +124,6 @@ const plugin = {
     const dispatchHandler = createDispatchHandler(api, config);
     api.registerHttpHandler(dispatchHandler);
     api.logger.info("[ax-platform] HTTP handler registered: /ax/dispatch");
-
-    // Register HTTP handler for /ax/metrics (observability endpoint)
-    const metricsHandler = async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
-      if (req.url !== "/ax/metrics" || req.method !== "GET") {
-        return false;
-      }
-      
-      const metrics = exportMetrics();
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(metrics, null, 2));
-      return true;
-    };
-    api.registerHttpHandler(metricsHandler);
-    api.logger.info("[ax-platform] HTTP handler registered: /ax/metrics");
 
     api.logger.info("[ax-platform] Plugin loaded successfully");
   },

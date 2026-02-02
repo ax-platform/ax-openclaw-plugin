@@ -27,8 +27,5 @@
   },
   "dependencies": {
     "@sinclair/typebox": "^0.32.0"
-  },
-  "optionalDependencies": {
-    "@modelcontextprotocol/sdk": "^1.25.0"
   }
 }

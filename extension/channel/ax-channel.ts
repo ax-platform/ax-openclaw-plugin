@@ -26,7 +26,6 @@ import type { AxDispatchPayload, AxDispatchResponse, DispatchSession } from "../
 import { loadAgentRegistry, getAgent, verifySignature, logRegisteredAgents } from "../lib/auth.js";
 import { sendProgressUpdate } from "../lib/api.js";
 import { buildMissionBriefing } from "../lib/context.js";
-import { handleIncomingDispatch } from "../lib/dnd.js";
 
 // Constants
 const DEDUP_TTL_MS = 15 * 60 * 1000; // 15 minutes (must exceed backend timeout of 10 min)
@@ -393,43 +392,6 @@ export function createDispatchHandler(
       const message = payload.user_message || payload.content || "";
       if (!message) {
         sendJson(res, 400, { status: "error", dispatch_id: dispatchId, error: "No message content" });
-        return true;
-      }
-
-      // Check DND mode - queue if agent is busy
-      const dndResult = handleIncomingDispatch(
-        session.agentHandle,
-        dispatchId,
-        payload,
-        session.senderHandle,
-        message
-      );
-
-      if (!dndResult.shouldProcess) {
-        // Agent is in DND mode - message queued
-        api.logger.info(
-          `[ax-platform] Agent ${session.agentHandle} in DND mode - message queued ` +
-          `(position: ${dndResult.queuedPosition}/${dndResult.queueDepth})`
-        );
-
-        // Build acknowledgment message
-        const queueInfo = dndResult.queueFull
-          ? `Queue is full (${dndResult.queueDepth} messages). Your message could not be queued.`
-          : `Your message has been received and queued (position ${dndResult.queuedPosition} of ${dndResult.queueDepth}). ` +
-            `${session.agentHandle} is currently working and will respond when available.`;
-
-        const ackMessage = `[DND Active] ${queueInfo}`;
-
-        // Mark dispatch as completed with acknowledgment
-        markDispatchCompleted(dispatchId, ackMessage);
-
-        // Return acknowledgment immediately
-        api.logger.info(`[ax-platform] DND acknowledgment sent: ${ackMessage}`);
-        sendJson(res, 200, {
-          status: "success",
-          dispatch_id: dispatchId,
-          response: ackMessage,
-        } satisfies AxDispatchResponse);
         return true;
       }
 
