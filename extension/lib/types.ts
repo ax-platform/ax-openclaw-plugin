@@ -32,21 +32,33 @@ export interface AxDispatchPayload {
   };
 }
 
+/**
+ * A single message in the conversation thread
+ */
+export interface Message {
+  author: string;
+  author_type?: string;
+  content: string;
+  timestamp?: string;
+  message_id?: string; // For fetching full content if needed
+}
+
 export interface ContextData {
   agents?: Array<{
     name: string;
     description?: string;
     type?: string;
   }>;
-  messages?: Array<{
-    author: string;
-    author_type?: string;
-    content: string;
-    timestamp?: string;
-  }>;
+  messages?: Message[];
   space_info?: {
     name?: string;
     description?: string;
+  };
+  // Metadata about context completeness
+  thread_info?: {
+    total_messages?: number;
+    first_message_timestamp?: string;
+    has_more?: boolean;
   };
 }
 

@@ -16,6 +16,7 @@ import { axMessagesTool } from "./tools/ax-messages.js";
 import { axTasksTool } from "./tools/ax-tasks.js";
 import { axContextTool } from "./tools/ax-context.js";
 import { axAgentsTool } from "./tools/ax-agents.js";
+import { axThreadTool } from "./tools/ax-thread.js";
 import { buildMissionBriefing } from "./lib/context.js";
 
 interface AxPlatformConfig {
@@ -81,7 +82,8 @@ const plugin = {
     api.registerTool(axTasksTool, { optional: true });
     api.registerTool(axContextTool, { optional: true });
     api.registerTool(axAgentsTool, { optional: true });
-    api.logger.info("[ax-platform] Tools registered: ax_messages, ax_tasks, ax_context, ax_agents");
+    api.registerTool(axThreadTool, { optional: true });
+    api.logger.info("[ax-platform] Tools registered: ax_messages, ax_tasks, ax_context, ax_agents, ax_thread");
 
     // Register before_agent_start hook for context injection
     // Uses api.on() event pattern (like memory-lancedb plugin)
