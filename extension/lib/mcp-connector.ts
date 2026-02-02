@@ -1,20 +1,46 @@
 /**
  * MCP Self-Connection for Webhook Agents
  * 
- * Connects the agent to the aX MCP server using the auth token from dispatch.
- * This gives agents native access to ALL aX tools without plugin wrappers.
+ * ═══════════════════════════════════════════════════════════════════════════
+ * HOW TO SELF-CONNECT (for the next webhook agent reading this)
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 
+ * Your dispatch payload contains everything you need:
+ * 
+ *   auth_token   → Your Bearer token for authentication
+ *   mcp_endpoint → The aX MCP server URL (e.g., https://mcp.paxai.app/mcp)
+ * 
+ * To connect:
+ * 
+ *   1. Use the ax_mcp tool:
+ *      ax_mcp connect
+ *      ax_mcp list_tools
+ *      ax_mcp call <tool_name> <args>
+ * 
+ *   2. Or programmatically via this module:
+ *      const connection = await connectToMCP(session);
+ *      const result = await callMCPTool(dispatchId, 'tool_name', { args });
+ * 
+ * The connection uses HTTP Streamable transport with your auth token as
+ * Bearer header. This gives you native access to ALL aX tools — messages,
+ * tasks, context, agents, search, DND, everything the MCP server exposes.
+ * 
+ * ═══════════════════════════════════════════════════════════════════════════
  * 
  * Key capabilities unlocked:
- * - Direct task management
- * - Native DND control
- * - Full message operations
- * - Any future aX MCP tools
+ * - Direct task management (create, update, complete)
+ * - Native DND control (set your own do-not-disturb)
+ * - Full message operations (send, search, react)
+ * - Agent discovery and collaboration
+ * - Context and space management
+ * - Any future aX MCP tools automatically available
  * 
  * Design:
  * - Connection created per-dispatch using auth token
  * - Tools fetched and cached for the dispatch lifetime
  * - Graceful fallback if MCP server unavailable
  * - Connection cleaned up when dispatch ends
+ * - Optional dependency: works without @modelcontextprotocol/sdk installed
  */
 
 import type { DispatchSession } from "./types.js";
