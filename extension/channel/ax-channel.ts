@@ -339,6 +339,8 @@ async function processDispatchAsync(
     const runtime = getAxPlatformRuntime();
 
     // Dispatch to agent
+    api.logger.info(`[ax-platform] ASYNC DEBUG: BEFORE dispatch - runtime exists=${!!runtime}, channel=${!!runtime?.channel}, reply=${!!runtime?.channel?.reply}`);
+    api.logger.info(`[ax-platform] ASYNC DEBUG: api.config type=${typeof api.config}, defined=${api.config !== undefined}`);
     try {
       await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
         ctx: ctxPayload,
@@ -346,18 +348,25 @@ async function processDispatchAsync(
         dispatcherOptions: {
           deliver: async (deliverPayload: { text?: string; mediaUrls?: string[] }) => {
             deliverCallCount++;
+            const elapsed = Date.now() - startTime;
+            api.logger.info(`[ax-platform] ASYNC: deliver() #${deliverCallCount} at ${elapsed}ms: ${deliverPayload.text?.length || 0} chars`);
             if (deliverPayload.text) {
               responseText += deliverPayload.text;
             }
           },
           onError: (err: unknown, info: { kind: string }) => {
+            const elapsed = Date.now() - startTime;
+            api.logger.error(`[ax-platform] ASYNC DEBUG: onError fired at ${elapsed}ms`);
             api.logger.error(`[ax-platform] ASYNC: Agent error (${info.kind}): ${err}`);
+            api.logger.error(`[ax-platform] ASYNC DEBUG: Error stack: ${err instanceof Error ? err.stack : 'N/A'}`);
             lastError = `${info.kind}: ${err}`;
           },
         },
       });
+      api.logger.info(`[ax-platform] ASYNC DEBUG: AFTER dispatch completed normally`);
     } catch (err) {
-      api.logger.error(`[ax-platform] ASYNC: Dispatch error: ${err}`);
+      api.logger.error(`[ax-platform] ASYNC: Dispatch THREW: ${err}`);
+      api.logger.error(`[ax-platform] ASYNC DEBUG: Error stack: ${err instanceof Error ? (err as Error).stack : 'N/A'}`);
       lastError = String(err);
     }
 
@@ -780,29 +789,49 @@ export function createDispatchHandler(
       let deliverCallCount = 0;
       let lastError: string | null = null;
 
+      // DEBUG: Log config contents for session resolution debugging
+      api.logger.info(`[ax-platform] DEBUG: api.config type=${typeof api.config}, defined=${api.config !== undefined}`);
+      if (api.config && typeof api.config === 'object') {
+        const configKeys = Object.keys(api.config as Record<string, unknown>);
+        api.logger.info(`[ax-platform] DEBUG: api.config keys=[${configKeys.join(', ')}]`);
+      }
+
       api.logger.info(`[ax-platform] Calling dispatcher for session ${sessionKey} (message=${message.length} chars, context=${missionBriefing.length} chars)`);
+      api.logger.info(`[ax-platform] DEBUG: ctxPayload.SessionKey=${ctxPayload.SessionKey}, Provider=${ctxPayload.Provider}, ChatType=${ctxPayload.ChatType}`);
       const startTime = Date.now();
 
       // Dispatch to agent - this runs the agent and calls deliver() with response
-      await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
-        ctx: ctxPayload,
-        cfg: api.config,
-        dispatcherOptions: {
-          deliver: async (deliverPayload: { text?: string; mediaUrls?: string[] }) => {
-            deliverCallCount++;
-            const elapsed = Date.now() - startTime;
-            api.logger.info(`[ax-platform] deliver() #${deliverCallCount} at ${elapsed}ms: ${deliverPayload.text?.length || 0} chars`);
-            if (deliverPayload.text) {
-              responseText += deliverPayload.text;
-            }
+      api.logger.info(`[ax-platform] DEBUG: BEFORE dispatchReplyWithBufferedBlockDispatcher - runtime.channel.reply exists=${!!runtime.channel?.reply}`);
+      api.logger.info(`[ax-platform] DEBUG: dispatchReplyWithBufferedBlockDispatcher type=${typeof runtime.channel?.reply?.dispatchReplyWithBufferedBlockDispatcher}`);
+
+      try {
+        await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+          ctx: ctxPayload,
+          cfg: api.config,
+          dispatcherOptions: {
+            deliver: async (deliverPayload: { text?: string; mediaUrls?: string[] }) => {
+              deliverCallCount++;
+              const elapsed = Date.now() - startTime;
+              api.logger.info(`[ax-platform] deliver() #${deliverCallCount} at ${elapsed}ms: ${deliverPayload.text?.length || 0} chars`);
+              if (deliverPayload.text) {
+                responseText += deliverPayload.text;
+              }
+            },
+            onError: (err: unknown, info: { kind: string }) => {
+              const elapsed = Date.now() - startTime;
+              api.logger.error(`[ax-platform] DEBUG: onError callback fired at ${elapsed}ms`);
+              api.logger.error(`[ax-platform] Agent error at ${elapsed}ms (${info.kind}): ${err}`);
+              api.logger.error(`[ax-platform] DEBUG: Error details - typeof=${typeof err}, stack=${err instanceof Error ? err.stack : 'N/A'}`);
+              lastError = `${info.kind}: ${err}`;
+            },
           },
-          onError: (err: unknown, info: { kind: string }) => {
-            const elapsed = Date.now() - startTime;
-            api.logger.error(`[ax-platform] Agent error at ${elapsed}ms (${info.kind}): ${err}`);
-            lastError = `${info.kind}: ${err}`;
-          },
-        },
-      });
+        });
+        api.logger.info(`[ax-platform] DEBUG: AFTER dispatchReplyWithBufferedBlockDispatcher completed normally`);
+      } catch (dispatchErr) {
+        api.logger.error(`[ax-platform] DEBUG: dispatchReplyWithBufferedBlockDispatcher THREW: ${dispatchErr}`);
+        api.logger.error(`[ax-platform] DEBUG: Error stack: ${dispatchErr instanceof Error ? dispatchErr.stack : 'N/A'}`);
+        throw dispatchErr;
+      }
 
       const elapsed = Date.now() - startTime;
       api.logger.info(`[ax-platform] Dispatcher complete in ${elapsed}ms, deliver calls: ${deliverCallCount}, response: ${responseText.length} chars`);
