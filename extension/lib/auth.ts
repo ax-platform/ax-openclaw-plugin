@@ -93,7 +93,7 @@ export function loadAgentRegistry(agents: AgentEntry[] | undefined): Map<string,
         }
       }
     } catch (err) {
-      console.error("[ax-platform] Error reading ax-agents.env:", err);
+      // Error reading ax-agents.env fallback
     }
   }
 
@@ -139,9 +139,6 @@ export function verifySignature(
     .update(payload)
     .digest("hex");
 
-  // Debug logging
-  console.error(`[ax-platform] Signature debug: timestamp=${timestamp}, secret=${secret.substring(0,8)}..., received=${expectedSig.substring(0,16)}..., computed=${computedSig.substring(0,16)}...`);
-
   // Length check required before timingSafeEqual (throws RangeError if lengths differ)
   if (expectedSig.length !== computedSig.length ||
       !crypto.timingSafeEqual(Buffer.from(expectedSig), Buffer.from(computedSig))) {
@@ -169,7 +166,6 @@ export function logRegisteredAgents(logger: { info: (msg: string) => void; error
   for (const [id, agent] of agentRegistry) {
     const handle = agent.handle || "(no handle)";
     const env = agent.env || "(no env)";
-    const secretPrefix = agent.secret?.substring(0, 8) || "no-secret";
-    logger.info(`[ax-platform]   ${handle} [${env}] -> ${id.substring(0, 8)}... (secret: ${secretPrefix}...)`);
+    logger.info(`[ax-platform]   ${handle} [${env}] -> ${id.substring(0, 8)}...`);
   }
 }

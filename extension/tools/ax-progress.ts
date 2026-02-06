@@ -47,6 +47,7 @@ Best-effort: failures are silent and won't interrupt your work.`,
     },
 
     async execute(
+      _toolCallId: string,
       params: { message: string; percent?: number; tool?: string },
       context: { sessionKey?: string; AxDispatchId?: string; AxAuthToken?: string }
     ) {

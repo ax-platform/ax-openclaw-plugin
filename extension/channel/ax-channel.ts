@@ -419,6 +419,7 @@ async function processDispatchAsync(
   const messageWithContext = `${missionBriefing}\n\n---\n\n**Current Message:**\n${message}`;
 
   // Build context payload
+  const asyncAgentHandle = (session.agentHandle || "agent").replace(/^@/, "");
   const ctxPayload = {
     Body: message,
     BodyForAgent: messageWithContext,
@@ -428,7 +429,7 @@ async function processDispatchAsync(
     From: `ax-platform:${session.senderHandle}`,
     To: `ax-platform:${session.agentHandle}`,
     SessionKey: sessionKey,
-    AccountId: "default",
+    AccountId: asyncAgentHandle,
     ChatType: "direct" as const,
     ConversationLabel: `${session.agentHandle} [${session.spaceName}]${agent.env ? ` (${agent.env})` : ''}`,
     SenderId: session.senderHandle,
@@ -453,13 +454,13 @@ async function processDispatchAsync(
 
     const runtime = getAxPlatformRuntime();
 
-    // Dispatch to agent
-    api.logger.info(`[ax-platform] ASYNC DEBUG: BEFORE dispatch - runtime exists=${!!runtime}, channel=${!!runtime?.channel}, reply=${!!runtime?.channel?.reply}`);
-    api.logger.info(`[ax-platform] ASYNC DEBUG: api.config type=${typeof api.config}, defined=${api.config !== undefined}`);
+    // Dispatch to agent — use top-level config for proper agent resolution
+    const asyncTopConfig = (runtime as any).config.loadConfig();
+    api.logger.info(`[ax-platform] ASYNC: Dispatching with top-level config (agents=${asyncTopConfig?.agents?.list?.length || 0}, bindings=${asyncTopConfig?.bindings?.length || 0})`);
     try {
       await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
         ctx: ctxPayload,
-        cfg: api.config,
+        cfg: asyncTopConfig,
         dispatcherOptions: {
           deliver: async (deliverPayload: { text?: string; mediaUrls?: string[] }) => {
             deliverCallCount++;
@@ -470,18 +471,13 @@ async function processDispatchAsync(
             }
           },
           onError: (err: unknown, info: { kind: string }) => {
-            const elapsed = Date.now() - startTime;
-            api.logger.error(`[ax-platform] ASYNC DEBUG: onError fired at ${elapsed}ms`);
             api.logger.error(`[ax-platform] ASYNC: Agent error (${info.kind}): ${err}`);
-            api.logger.error(`[ax-platform] ASYNC DEBUG: Error stack: ${err instanceof Error ? err.stack : 'N/A'}`);
             lastError = `${info.kind}: ${err}`;
           },
         },
       });
-      api.logger.info(`[ax-platform] ASYNC DEBUG: AFTER dispatch completed normally`);
     } catch (err) {
-      api.logger.error(`[ax-platform] ASYNC: Dispatch THREW: ${err}`);
-      api.logger.error(`[ax-platform] ASYNC DEBUG: Error stack: ${err instanceof Error ? (err as Error).stack : 'N/A'}`);
+      api.logger.error(`[ax-platform] ASYNC: Dispatch threw: ${err}`);
       lastError = String(err);
     }
 
@@ -529,10 +525,12 @@ async function processDispatchAsync(
       api.logger.warn(`[ax-platform] ASYNC: CRITICAL - No callback_url or callback_api_key, response will be lost!`);
     }
 
-    // Clean up session
+    // Clean up session (only delete index if it still points to this dispatch)
     setTimeout(() => {
       dispatchSessions.delete(dispatchId);
-      sessionKeyIndex.delete(sessionKey);
+      if (sessionKeyIndex.get(sessionKey) === dispatchId) {
+        sessionKeyIndex.delete(sessionKey);
+      }
     }, SESSION_CLEANUP_DELAY_MS);
   } finally {
     // Always clean up heartbeat timer and event subscription
@@ -749,10 +747,22 @@ export function createDispatchHandler(
       }
       // status === "new" - proceed with processing
 
-      // Session key for CONVERSATION CONTINUITY - based on agent + space
-      // This ensures messages to the same agent in the same space share history
+      // Resolve agent route using Clawdbot's native routing system
+      // This matches our bindings config to route each aX agent to its own workspace
       const spaceId = payload.space_id || "default";
-      const sessionKey = `ax-agent-${payload.agent_id}-${spaceId}`;
+      const agentHandle = (agent.handle || "agent").replace(/^@/, "");
+      const routeRuntime = getAxPlatformRuntime();
+      const topLevelConfig = (routeRuntime as any).config.loadConfig();
+
+      const route = (routeRuntime as any).channel.routing.resolveAgentRoute({
+        cfg: topLevelConfig,
+        channel: "ax-platform",
+        accountId: agentHandle,
+        peer: { kind: "dm", id: payload.sender_handle || "unknown" },
+      });
+
+      const sessionKey = route.sessionKey;
+      api.logger.info(`[ax-platform] ROUTE: agent=${agentHandle} -> clawdbot_agent=${route.agentId} session=${sessionKey} matched_by=${route.matchedBy || 'default'}`);
 
       // Store session context for hooks/tools - keyed by dispatchId (not sessionKey!)
       // This prevents concurrent dispatches from overwriting each other's context
@@ -884,7 +894,7 @@ export function createDispatchHandler(
         From: `ax-platform:${session.senderHandle}`,
         To: `ax-platform:${session.agentHandle}`,
         SessionKey: sessionKey,
-        AccountId: "default",
+        AccountId: session.agentHandle?.replace('@', '') || "default",
         ChatType: "direct" as const,
         ConversationLabel: `${session.agentHandle} [${session.spaceName}]${agent.env ? ` (${agent.env})` : ''}`,
         SenderId: session.senderHandle,
@@ -909,25 +919,17 @@ export function createDispatchHandler(
       let deliverCallCount = 0;
       let lastError: string | null = null;
 
-      // DEBUG: Log config contents for session resolution debugging
-      api.logger.info(`[ax-platform] DEBUG: api.config type=${typeof api.config}, defined=${api.config !== undefined}`);
-      if (api.config && typeof api.config === 'object') {
-        const configKeys = Object.keys(api.config as Record<string, unknown>);
-        api.logger.info(`[ax-platform] DEBUG: api.config keys=[${configKeys.join(', ')}]`);
-      }
-
       api.logger.info(`[ax-platform] Calling dispatcher for session ${sessionKey} (message=${message.length} chars, context=${missionBriefing.length} chars)`);
-      api.logger.info(`[ax-platform] DEBUG: ctxPayload.SessionKey=${ctxPayload.SessionKey}, Provider=${ctxPayload.Provider}, ChatType=${ctxPayload.ChatType}`);
       const startTime = Date.now();
 
-      // Dispatch to agent - this runs the agent and calls deliver() with response
-      api.logger.info(`[ax-platform] DEBUG: BEFORE dispatchReplyWithBufferedBlockDispatcher - runtime.channel.reply exists=${!!runtime.channel?.reply}`);
-      api.logger.info(`[ax-platform] DEBUG: dispatchReplyWithBufferedBlockDispatcher type=${typeof runtime.channel?.reply?.dispatchReplyWithBufferedBlockDispatcher}`);
+      // Dispatch to agent — use top-level config for proper agent resolution
+      const syncTopConfig = (runtime as any).config.loadConfig();
+      api.logger.info(`[ax-platform] SYNC: Dispatching with top-level config (agents=${syncTopConfig?.agents?.list?.length || 0}, bindings=${syncTopConfig?.bindings?.length || 0})`);
 
       try {
         await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
           ctx: ctxPayload,
-          cfg: api.config,
+          cfg: syncTopConfig,
           dispatcherOptions: {
             deliver: async (deliverPayload: { text?: string; mediaUrls?: string[] }) => {
               deliverCallCount++;
@@ -939,17 +941,13 @@ export function createDispatchHandler(
             },
             onError: (err: unknown, info: { kind: string }) => {
               const elapsed = Date.now() - startTime;
-              api.logger.error(`[ax-platform] DEBUG: onError callback fired at ${elapsed}ms`);
               api.logger.error(`[ax-platform] Agent error at ${elapsed}ms (${info.kind}): ${err}`);
-              api.logger.error(`[ax-platform] DEBUG: Error details - typeof=${typeof err}, stack=${err instanceof Error ? err.stack : 'N/A'}`);
               lastError = `${info.kind}: ${err}`;
             },
           },
         });
-        api.logger.info(`[ax-platform] DEBUG: AFTER dispatchReplyWithBufferedBlockDispatcher completed normally`);
       } catch (dispatchErr) {
-        api.logger.error(`[ax-platform] DEBUG: dispatchReplyWithBufferedBlockDispatcher THREW: ${dispatchErr}`);
-        api.logger.error(`[ax-platform] DEBUG: Error stack: ${dispatchErr instanceof Error ? dispatchErr.stack : 'N/A'}`);
+        api.logger.error(`[ax-platform] Dispatch threw: ${dispatchErr}`);
         throw dispatchErr;
       }
 
@@ -972,7 +970,9 @@ export function createDispatchHandler(
       // Clean up dispatch context after a grace period (allows hooks/tools to complete)
       setTimeout(() => {
         dispatchSessions.delete(dispatchId);
-        sessionKeyIndex.delete(sessionKey);
+        if (sessionKeyIndex.get(sessionKey) === dispatchId) {
+          sessionKeyIndex.delete(sessionKey);
+        }
       }, SESSION_CLEANUP_DELAY_MS);
 
       // Return response with better error context
@@ -1017,10 +1017,21 @@ export function createDispatchHandler(
 }
 
 // Helpers
+const MAX_BODY_SIZE = 1024 * 1024; // 1MB limit
+
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (chunk) => chunks.push(chunk));
+    let size = 0;
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_SIZE) {
+        req.destroy();
+        reject(new Error(`Request body exceeds ${MAX_BODY_SIZE} bytes`));
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
     req.on("error", reject);
   });

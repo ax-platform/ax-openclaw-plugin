@@ -15,21 +15,17 @@ const handler: HookHandler = async (event) => {
 
   // Check if this is an aX session
   const sessionKey = event.sessionKey;
-  if (!sessionKey?.startsWith("ax-agent-")) {
-    return;
-  }
+  if (!sessionKey) return;
 
-  // Get dispatch session context
   const session = getDispatchSession(sessionKey);
-  if (!session) {
-    return;
-  }
+  if (!session) return;
 
   // Build mission briefing
   const briefing = buildMissionBriefing(
     session.agentHandle,
     session.spaceName,
     session.senderHandle,
+    session.senderType,
     session.contextData
   );
 

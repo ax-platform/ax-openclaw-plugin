@@ -63,12 +63,6 @@ const plugin = {
 
     const config = (api.config || {}) as AxPlatformConfig;
     api.logger.info(`[ax-platform] Config received: agents=${config.agents?.length || 0}, backendUrl=${config.backendUrl || 'default'}`);
-    if (config.agents && config.agents.length > 0) {
-      api.logger.info(`[ax-platform] Config agents from api.config:`);
-      for (const a of config.agents) {
-        api.logger.info(`[ax-platform]   ${a.handle || 'unknown'}: ${a.secret?.substring(0, 8) || 'no-secret'}...`);
-      }
-    }
 
     // Register the aX Platform channel
     const channel = createAxChannel(config);
@@ -92,16 +86,12 @@ const plugin = {
     // Returns { prependContext: "..." } to inject into agent context
     api.on("before_agent_start", async (event: any) => {
       const sessionKey = event.sessionKey;
-      // Check for aX session
-      if (!sessionKey?.startsWith("ax-agent-")) {
-        return; // Not an aX session
-      }
+      if (!sessionKey) return;
 
-      // Look up dispatch context by sessionKey (searches all active dispatches)
+      // Look up dispatch context — if found, this is an aX session
       const session = getDispatchSession(sessionKey);
       if (!session) {
-        api.logger.warn(`[ax-platform] No active dispatch found for session ${sessionKey}`);
-        return; // No context available (dispatch may have completed)
+        return; // Not an aX session or dispatch already completed
       }
 
       // Build mission briefing with agent identity
