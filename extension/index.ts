@@ -11,6 +11,7 @@
 
 import type { ClawdbotPluginApi, PluginRuntime } from "clawdbot/plugin-sdk";
 import { createAxChannel, createDispatchHandler, setAxPlatformRuntime, getDispatchSession } from "./channel/ax-channel.js";
+import type { OutboundConfig } from "./lib/types.js";
 import { logRegisteredAgents } from "./lib/auth.js";
 import { axMessagesTool } from "./tools/ax-messages.js";
 import { axTasksTool } from "./tools/ax-tasks.js";
@@ -28,6 +29,7 @@ interface AxPlatformConfig {
     env?: string;
   }>;
   backendUrl?: string;
+  outbound?: OutboundConfig;
 }
 
 const plugin = {
@@ -65,7 +67,7 @@ const plugin = {
     api.logger.info(`[ax-platform] Config received: agents=${config.agents?.length || 0}, backendUrl=${config.backendUrl || 'default'}`);
 
     // Register the aX Platform channel
-    const channel = createAxChannel(config);
+    const channel = createAxChannel({ ...config, outbound: config.outbound });
     api.registerChannel({ plugin: channel });
     api.logger.info("[ax-platform] Channel registered: ax-platform");
 

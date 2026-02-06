@@ -22,7 +22,7 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { PluginRuntime } from "clawdbot/plugin-sdk";
-import type { AxDispatchPayload, AxDispatchResponse, DispatchSession } from "../lib/types.js";
+import type { AxDispatchPayload, AxDispatchResponse, DispatchSession, OutboundConfig } from "../lib/types.js";
 import { loadAgentRegistry, getAgent, verifySignature, logRegisteredAgents } from "../lib/auth.js";
 import { sendProgressUpdate } from "../lib/api.js";
 import { buildMissionBriefing } from "../lib/context.js";
@@ -572,10 +572,12 @@ export function getDispatchSession(sessionKey: string): DispatchSession | undefi
  * Create the aX Platform channel plugin
  */
 export function createAxChannel(config: {
+  outbound?: OutboundConfig;
   agents?: Array<{ id: string; secret: string; handle?: string; env?: string }>;
   backendUrl?: string;
 }) {
   const backendUrl = config.backendUrl || process.env.AX_BACKEND_URL || "http://localhost:8001";
+  const outboundConfig = config.outbound || {};
 
   // Load agent registry from config
   loadAgentRegistry(config.agents);
@@ -601,13 +603,89 @@ export function createAxChannel(config: {
     },
 
     outbound: {
-      deliveryMode: "direct",
+      deliveryMode: "direct" as const,
 
-      // Handle agent responses - this is called by the dispatcher
-      async sendText({ text, sessionKey }: { text: string; sessionKey?: string }) {
-        // For aX, responses are returned via HTTP response in the dispatch handler
-        // This is a no-op since we use sync-over-async pattern
-        return { ok: true };
+      /**
+       * Send text to aX Platform (for heartbeat/cron delivery)
+       * Uses MCP messages tool with configured token
+       */
+      async sendText({ 
+        text, 
+        to,
+        accountId,
+        sessionKey 
+      }: { 
+        text: string; 
+        to?: string; 
+        accountId?: string;
+        sessionKey?: string;
+      }) {
+        const logger = runtime?.logger || { info: console.log, error: console.error };
+        
+        // Get outbound config
+        const outboundCfg = outboundConfig || {};
+        const mcpEndpoint = outboundCfg.mcpEndpoint || process.env.AX_MCP_ENDPOINT || "https://mcp.paxai.app";
+        
+        let authToken: string | undefined;
+        
+        // Try token file first
+        if (outboundCfg.tokenFile) {
+          try {
+            const fs = await import("node:fs");
+            const tokenPath = outboundCfg.tokenFile.replace(/^~/, process.env.HOME || "");
+            const tokenData = JSON.parse(fs.readFileSync(tokenPath, "utf-8"));
+            authToken = tokenData.access_token;
+          } catch (err) {
+            logger.error(`[ax-platform] Failed to read token file: ${err}`);
+          }
+        }
+        
+        // Fallback to env var
+        if (!authToken) {
+          authToken = process.env.AX_ACCESS_TOKEN;
+        }
+        
+        if (!authToken) {
+          logger.error("[ax-platform] Outbound failed: No access token configured");
+          return { ok: false, error: "No access token" };
+        }
+        
+        // Determine target space (parse "space:UUID" or use directly)
+        const spaceId = to?.replace(/^space:/, "") || outboundCfg.defaultSpaceId;
+        if (!spaceId) {
+          logger.error("[ax-platform] Outbound failed: No target space");
+          return { ok: false, error: "No target space" };
+        }
+        
+        // Send via MCP messages tool
+        try {
+          const response = await fetch(`${mcpEndpoint}/tools/messages`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${authToken}`,
+            },
+            body: JSON.stringify({
+              action: "send",
+              content: text,
+              space_id: spaceId,
+            }),
+          });
+          
+          if (!response.ok) {
+            const errText = await response.text();
+            logger.error(`[ax-platform] Outbound failed: ${response.status} ${errText}`);
+            return { ok: false, error: `HTTP ${response.status}` };
+          }
+          
+          const result = await response.json();
+          const preview = text.length > 50 ? text.substring(0, 50) + "..." : text;
+          logger.info(`[ax-platform] Outbound sent to ${spaceId}: ${preview}`);
+          return { ok: true, messageId: result.message_id };
+        } catch (err) {
+          logger.error(`[ax-platform] Outbound error: ${err}`);
+          return { ok: false, error: String(err) };
+        }
       },
     },
 
@@ -641,6 +719,7 @@ export function createDispatchHandler(
   config: { backendUrl?: string }
 ) {
   const backendUrl = config.backendUrl || "http://localhost:8001";
+  const outboundConfig = config.outbound || {};
 
   return async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
     // Only handle /ax/dispatch
