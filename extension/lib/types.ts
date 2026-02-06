@@ -99,3 +99,10 @@ export interface DispatchSession {
   contextData?: ContextData;
   startTime: number;
 }
+
+// Outbound delivery configuration
+export interface OutboundConfig {
+  mcpEndpoint?: string;      // Default: https://mcp.paxai.app
+  tokenFile?: string;        // Path to token JSON file
+  defaultSpaceId?: string;   // Default space for delivery
+}
