@@ -571,6 +571,39 @@ export function getDispatchSession(sessionKey: string): DispatchSession | undefi
 /**
  * Create the aX Platform channel plugin
  */
+
+/**
+ * Resolve auth token for outbound MCP calls.
+ * Checks token file first, then env var.
+ */
+async function resolveOutboundAuthToken(
+  outboundCfg: OutboundConfig,
+  logger: { error: (msg: string) => void }
+): Promise<string> {
+  let authToken: string | undefined;
+
+  if (outboundCfg.tokenFile) {
+    try {
+      const fs = await import("node:fs");
+      const tokenPath = outboundCfg.tokenFile.replace(/^~/, process.env.HOME || "");
+      const tokenData = JSON.parse(fs.readFileSync(tokenPath, "utf-8"));
+      authToken = tokenData.access_token;
+    } catch (err) {
+      logger.error(`[ax-platform] Failed to read token file: ${err}`);
+    }
+  }
+
+  if (!authToken) {
+    authToken = process.env.AX_ACCESS_TOKEN;
+  }
+
+  if (!authToken) {
+    throw new Error("[ax-platform] Outbound failed: No access token configured. Set outbound.tokenFile or AX_ACCESS_TOKEN.");
+  }
+
+  return authToken;
+}
+
 export function createAxChannel(config: {
   outbound?: OutboundConfig;
   agents?: Array<{ id: string; secret: string; handle?: string; env?: string }>;
@@ -637,33 +670,9 @@ export function createAxChannel(config: {
         gifPlayback?: boolean;
       }) {
         const logger = runtime?.logger || { info: console.log, error: console.error };
-
-        // Resolve auth token
         const outboundCfg = outboundConfig || {};
         const mcpEndpoint = outboundCfg.mcpEndpoint || process.env.AX_MCP_ENDPOINT || "https://mcp.paxai.app";
-
-        let authToken: string | undefined;
-
-        // Try token file first (e.g., ~/.clawdbot/workspaces/<agent>/.ax-token.json)
-        if (outboundCfg.tokenFile) {
-          try {
-            const fs = await import("node:fs");
-            const tokenPath = outboundCfg.tokenFile.replace(/^~/, process.env.HOME || "");
-            const tokenData = JSON.parse(fs.readFileSync(tokenPath, "utf-8"));
-            authToken = tokenData.access_token;
-          } catch (err) {
-            logger.error(`[ax-platform] Failed to read token file: ${err}`);
-          }
-        }
-
-        // Fallback to env var
-        if (!authToken) {
-          authToken = process.env.AX_ACCESS_TOKEN;
-        }
-
-        if (!authToken) {
-          throw new Error("[ax-platform] Outbound failed: No access token configured. Set outbound.tokenFile or AX_ACCESS_TOKEN.");
-        }
+        const authToken = await resolveOutboundAuthToken(outboundCfg, logger);
 
         // Send via MCP JSON-RPC (callAxTool now uses proper protocol)
         try {
@@ -708,24 +717,7 @@ export function createAxChannel(config: {
         const logger = runtime?.logger || { info: console.log, error: console.error };
         const outboundCfg = outboundConfig || {};
         const mcpEndpoint = outboundCfg.mcpEndpoint || process.env.AX_MCP_ENDPOINT || "https://mcp.paxai.app";
-
-        let authToken: string | undefined;
-        if (outboundCfg.tokenFile) {
-          try {
-            const fs = await import("node:fs");
-            const tokenPath = outboundCfg.tokenFile.replace(/^~/, process.env.HOME || "");
-            const tokenData = JSON.parse(fs.readFileSync(tokenPath, "utf-8"));
-            authToken = tokenData.access_token;
-          } catch (err) {
-            logger.error(`[ax-platform] Failed to read token file: ${err}`);
-          }
-        }
-        if (!authToken) {
-          authToken = process.env.AX_ACCESS_TOKEN;
-        }
-        if (!authToken) {
-          throw new Error("[ax-platform] Outbound failed: No access token.");
-        }
+        const authToken = await resolveOutboundAuthToken(outboundCfg, logger);
 
         const content = mediaUrl ? `${text}\n${mediaUrl}` : text;
         try {

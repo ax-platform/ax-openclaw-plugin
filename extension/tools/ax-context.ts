@@ -21,8 +21,8 @@ export const axContextTool = {
     prefix: Type.Optional(Type.String({ description: "Prefix filter (for list)" })),
   }),
 
-  async execute(_toolCallId: string, params: Record<string, unknown>, context: { sessionKey?: string }) {
-    const sessionKey = context.sessionKey;
+  async execute(_toolCallId: string, params: Record<string, unknown>, context: Record<string, unknown>) {
+    const sessionKey = (context.sessionKey || context.SessionKey) as string | undefined;
     const session = sessionKey ? getDispatchSession(sessionKey) : undefined;
 
     if (!session?.authToken || !session?.mcpEndpoint) {

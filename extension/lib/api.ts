@@ -49,6 +49,10 @@ export async function callAxTool(
   toolName: string,
   params: Record<string, unknown>
 ): Promise<unknown> {
+  if (!mcpEndpoint) throw new Error("callAxTool: mcpEndpoint is required");
+  if (!authToken) throw new Error("callAxTool: authToken is required");
+  if (!toolName) throw new Error("callAxTool: toolName is required");
+
   // Ensure endpoint ends with /mcp (the JSON-RPC endpoint)
   const rpcUrl = mcpEndpoint.endsWith("/mcp")
     ? mcpEndpoint
@@ -99,7 +103,10 @@ export async function callAxTool(
           }
         } catch (parseErr) {
           if (parseErr instanceof Error && parseErr.message.startsWith("MCP error:")) throw parseErr;
-          // Not valid JSON — skip this line
+          // Not valid JSON — log for debugging and skip
+          if (process.env.DEBUG || process.env.LOG_LEVEL === "debug") {
+            console.debug(`[ax-platform] SSE parse skip: ${line.substring(0, 100)}`);
+          }
         }
       }
     }
@@ -116,8 +123,16 @@ export async function callAxTool(
 
 /**
  * Extract the text content from an MCP tools/call result.
- * MCP returns { content: [{ type: "text", text: "..." }] }
- * We parse the text as JSON if possible, otherwise return it as-is.
+ *
+ * MCP returns results in the format:
+ *   { content: [{ type: "text", text: "..." }, ...] }
+ *
+ * This function:
+ * 1. Extracts all text content parts from the content array
+ * 2. Joins them with newlines
+ * 3. Attempts to parse as JSON (for structured results like message lists)
+ * 4. Falls back to raw text string if not valid JSON
+ * 5. Returns the original result if no content array is present
  */
 function extractToolResult(result: unknown): unknown {
   if (!result || typeof result !== "object") return result;

@@ -23,8 +23,8 @@ export const axTasksTool = {
     filter: Type.Optional(Type.String({ description: "Filter for list", default: "my_tasks" })),
   }),
 
-  async execute(_toolCallId: string, params: Record<string, unknown>, context: { sessionKey?: string }) {
-    const sessionKey = context.sessionKey;
+  async execute(_toolCallId: string, params: Record<string, unknown>, context: Record<string, unknown>) {
+    const sessionKey = (context.sessionKey || context.SessionKey) as string | undefined;
     const session = sessionKey ? getDispatchSession(sessionKey) : undefined;
 
     if (!session?.authToken || !session?.mcpEndpoint) {

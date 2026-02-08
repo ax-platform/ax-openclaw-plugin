@@ -11,7 +11,7 @@ import type { DashboardContext } from '../ui/index.js';
 
 export const axDashboardTool: ClawdbotTool = {
   name: "ax_dashboard",
-  description: "Display the aX Platform visibility dashboard showing agent identity, space, tasks, and activity timeline",
+  description: "[Preview] Display the aX Platform visibility dashboard. Currently shows demo data — live data integration pending.",
   inputSchema: {
     type: "object" as const,
     properties: {
@@ -24,7 +24,7 @@ export const axDashboardTool: ClawdbotTool = {
   },
   
   async execute(params: { view?: string }, context: any) {
-    // For now, use mock context - will be replaced with live data
+    // Preview mode: uses mock context until live MCP data integration is implemented
     const dashboardContext = createMockContext();
     
     // Build the HTML dashboard
