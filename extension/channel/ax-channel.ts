@@ -24,7 +24,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { PluginRuntime } from "clawdbot/plugin-sdk";
 import type { AxDispatchPayload, AxDispatchResponse, DispatchSession, OutboundConfig } from "../lib/types.js";
 import { loadAgentRegistry, getAgent, verifySignature, logRegisteredAgents } from "../lib/auth.js";
-import { sendProgressUpdate } from "../lib/api.js";
+import { sendProgressUpdate, callAxTool } from "../lib/api.js";
 import { buildMissionBriefing } from "../lib/context.js";
 
 // ─── Agent Event Tracking ───────────────────────────────────────────────────
@@ -606,29 +606,45 @@ export function createAxChannel(config: {
       deliveryMode: "direct" as const,
 
       /**
-       * Send text to aX Platform (for heartbeat/cron delivery)
-       * Uses MCP messages tool with configured token
+       * Resolve outbound target for aX Platform
+       * Accepts "space:<id>" or raw space ID
        */
-      async sendText({ 
-        text, 
-        to,
-        accountId,
-        sessionKey 
-      }: { 
-        text: string; 
-        to?: string; 
-        accountId?: string;
-        sessionKey?: string;
+      resolveTarget({ to }: { to?: string; accountId?: string | null }) {
+        const spaceId = to?.replace(/^space:/, "") || outboundConfig?.defaultSpaceId;
+        if (!spaceId) {
+          return { ok: false as const, error: new Error("No target space. Use 'space:<id>' or configure defaultSpaceId.") };
+        }
+        return { ok: true as const, to: spaceId };
+      },
+
+      /**
+       * Send text to aX Platform via MCP JSON-RPC protocol.
+       *
+       * Matches Clawdbot ChannelOutboundContext signature:
+       *   (ctx: { cfg, to, text, accountId?, ... }) => Promise<OutboundDeliveryResult>
+       *
+       * Uses callAxTool which sends proper MCP tools/call JSON-RPC to the server.
+       */
+      async sendText({ text, to }: {
+        cfg: unknown;
+        to: string;
+        text: string;
+        mediaUrl?: string;
+        accountId?: string | null;
+        replyToId?: string | null;
+        threadId?: string | number | null;
+        deps?: unknown;
+        gifPlayback?: boolean;
       }) {
         const logger = runtime?.logger || { info: console.log, error: console.error };
-        
-        // Get outbound config
+
+        // Resolve auth token
         const outboundCfg = outboundConfig || {};
         const mcpEndpoint = outboundCfg.mcpEndpoint || process.env.AX_MCP_ENDPOINT || "https://mcp.paxai.app";
-        
+
         let authToken: string | undefined;
-        
-        // Try token file first
+
+        // Try token file first (e.g., ~/.clawdbot/workspaces/<agent>/.ax-token.json)
         if (outboundCfg.tokenFile) {
           try {
             const fs = await import("node:fs");
@@ -639,52 +655,94 @@ export function createAxChannel(config: {
             logger.error(`[ax-platform] Failed to read token file: ${err}`);
           }
         }
-        
+
         // Fallback to env var
         if (!authToken) {
           authToken = process.env.AX_ACCESS_TOKEN;
         }
-        
+
         if (!authToken) {
-          logger.error("[ax-platform] Outbound failed: No access token configured");
-          return { ok: false, error: "No access token" };
+          throw new Error("[ax-platform] Outbound failed: No access token configured. Set outbound.tokenFile or AX_ACCESS_TOKEN.");
         }
-        
-        // Determine target space (parse "space:UUID" or use directly)
-        const spaceId = to?.replace(/^space:/, "") || outboundCfg.defaultSpaceId;
-        if (!spaceId) {
-          logger.error("[ax-platform] Outbound failed: No target space");
-          return { ok: false, error: "No target space" };
-        }
-        
-        // Send via MCP messages tool
+
+        // Send via MCP JSON-RPC (callAxTool now uses proper protocol)
         try {
-          const response = await fetch(`${mcpEndpoint}/tools/messages`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${authToken}`,
-            },
-            body: JSON.stringify({
-              action: "send",
-              content: text,
-              space_id: spaceId,
-            }),
+          const result = await callAxTool(mcpEndpoint, authToken, "messages", {
+            action: "send",
+            content: text,
           });
-          
-          if (!response.ok) {
-            const errText = await response.text();
-            logger.error(`[ax-platform] Outbound failed: ${response.status} ${errText}`);
-            return { ok: false, error: `HTTP ${response.status}` };
-          }
-          
-          const result = await response.json();
+
+          const messageId = (result && typeof result === "object" && "message_id" in result)
+            ? String((result as Record<string, unknown>).message_id)
+            : `ax-${Date.now()}`;
+
           const preview = text.length > 50 ? text.substring(0, 50) + "..." : text;
-          logger.info(`[ax-platform] Outbound sent to ${spaceId}: ${preview}`);
-          return { ok: true, messageId: result.message_id };
+          logger.info(`[ax-platform] Outbound sent to ${to}: ${preview}`);
+
+          return {
+            channel: "ax-platform" as const,
+            messageId,
+            chatId: to,
+          };
         } catch (err) {
           logger.error(`[ax-platform] Outbound error: ${err}`);
-          return { ok: false, error: String(err) };
+          throw err;
+        }
+      },
+
+      /**
+       * Send media to aX Platform (sends caption + media link)
+       */
+      async sendMedia({ text, to, mediaUrl }: {
+        cfg: unknown;
+        to: string;
+        text: string;
+        mediaUrl?: string;
+        accountId?: string | null;
+        replyToId?: string | null;
+        threadId?: string | number | null;
+        deps?: unknown;
+        gifPlayback?: boolean;
+      }) {
+        const logger = runtime?.logger || { info: console.log, error: console.error };
+        const outboundCfg = outboundConfig || {};
+        const mcpEndpoint = outboundCfg.mcpEndpoint || process.env.AX_MCP_ENDPOINT || "https://mcp.paxai.app";
+
+        let authToken: string | undefined;
+        if (outboundCfg.tokenFile) {
+          try {
+            const fs = await import("node:fs");
+            const tokenPath = outboundCfg.tokenFile.replace(/^~/, process.env.HOME || "");
+            const tokenData = JSON.parse(fs.readFileSync(tokenPath, "utf-8"));
+            authToken = tokenData.access_token;
+          } catch (err) {
+            logger.error(`[ax-platform] Failed to read token file: ${err}`);
+          }
+        }
+        if (!authToken) {
+          authToken = process.env.AX_ACCESS_TOKEN;
+        }
+        if (!authToken) {
+          throw new Error("[ax-platform] Outbound failed: No access token.");
+        }
+
+        const content = mediaUrl ? `${text}\n${mediaUrl}` : text;
+        try {
+          const result = await callAxTool(mcpEndpoint, authToken, "messages", {
+            action: "send",
+            content,
+          });
+          const messageId = (result && typeof result === "object" && "message_id" in result)
+            ? String((result as Record<string, unknown>).message_id)
+            : `ax-${Date.now()}`;
+          return {
+            channel: "ax-platform" as const,
+            messageId,
+            chatId: to,
+          };
+        } catch (err) {
+          logger.error(`[ax-platform] Outbound media error: ${err}`);
+          throw err;
         }
       },
     },
