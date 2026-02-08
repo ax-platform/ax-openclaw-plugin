@@ -48,7 +48,7 @@ export function buildDashboardHtml(context: DashboardContext): string {
         jsonrpc: '2.0',
         method: 'tools/call',
         params: { name: toolName, arguments: params }
-      }, '*');
+      }, window.location.origin);
     }
     
     function completeTask(taskId) {
@@ -58,6 +58,17 @@ export function buildDashboardHtml(context: DashboardContext): string {
     function assignTask(taskId) {
       callTool('ax_tasks', { action: 'assign', task_id: taskId });
     }
+
+    // Event delegation for task action buttons (avoids inline onclick XSS risk)
+    document.addEventListener('click', function(e) {
+      const btn = e.target.closest('[data-action]');
+      if (!btn) return;
+      const action = btn.getAttribute('data-action');
+      const taskId = btn.getAttribute('data-task-id');
+      if (!taskId) return;
+      if (action === 'complete') completeTask(taskId);
+      else if (action === 'assign') assignTask(taskId);
+    });
   </script>
 </body>
 </html>`;
@@ -182,11 +193,11 @@ function buildTaskCard(task: Task): string {
     ${task.description ? `<p class="text-xs text-gray-500 dark:text-gray-400 mb-2 line-clamp-2">${escapeHtml(task.description)}</p>` : ''}
     ${task.status !== 'completed' ? `
     <div class="flex gap-2 mt-2">
-      <button onclick="completeTask('${task.id}')" class="text-xs px-2 py-1 bg-green-600 text-white rounded hover:bg-green-700">
+      <button data-action="complete" data-task-id="${escapeHtml(task.id)}" class="text-xs px-2 py-1 bg-green-600 text-white rounded hover:bg-green-700">
         Complete
       </button>
       ${!task.assignedTo ? `
-      <button onclick="assignTask('${task.id}')" class="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700">
+      <button data-action="assign" data-task-id="${escapeHtml(task.id)}" class="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700">
         Assign
       </button>
       ` : ''}

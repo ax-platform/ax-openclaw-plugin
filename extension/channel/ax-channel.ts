@@ -670,6 +670,7 @@ export function createAxChannel(config: {
           const result = await callAxTool(mcpEndpoint, authToken, "messages", {
             action: "send",
             content: text,
+            space_id: to,
           });
 
           const messageId = (result && typeof result === "object" && "message_id" in result)
@@ -731,6 +732,7 @@ export function createAxChannel(config: {
           const result = await callAxTool(mcpEndpoint, authToken, "messages", {
             action: "send",
             content,
+            space_id: to,
           });
           const messageId = (result && typeof result === "object" && "message_id" in result)
             ? String((result as Record<string, unknown>).message_id)
@@ -777,7 +779,6 @@ export function createDispatchHandler(
   config: { backendUrl?: string }
 ) {
   const backendUrl = config.backendUrl || "http://localhost:8001";
-  const outboundConfig = config.outbound || {};
 
   return async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
     // Only handle /ax/dispatch
