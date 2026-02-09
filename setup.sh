@@ -160,13 +160,28 @@ cmd_sync() {
     cd "$SCRIPT_DIR"
 
     log_info "Updating clawdbot.json..."
-    UPDATED_CONFIG=$(cat "$CONFIG_FILE" | jq --argjson agents "$AGENTS_JSON" '
+    # Resolve outbound token file (first .ax-token.json found in workspaces)
+    local token_file=""
+    for ws in "$HOME/.clawdbot/workspaces"/*/.ax-token.json; do
+        if [[ -f "$ws" ]]; then
+            token_file="$ws"
+            break
+        fi
+    done
+
+    UPDATED_CONFIG=$(cat "$CONFIG_FILE" | jq --argjson agents "$AGENTS_JSON" --arg tokenFile "${token_file}" '
         .plugins.entries["ax-platform"].enabled = true |
         .plugins.entries["ax-platform"].config.agents = $agents |
-        .plugins.entries["ax-platform"].config.backendUrl = "https://api.paxai.app"
+        .plugins.entries["ax-platform"].config.backendUrl = "https://api.paxai.app" |
+        .plugins.entries["ax-platform"].config.outbound.mcpEndpoint = "https://mcp.paxai.app" |
+        if $tokenFile != "" then .plugins.entries["ax-platform"].config.outbound.tokenFile = $tokenFile else . end
     ')
     echo "$UPDATED_CONFIG" > "$CONFIG_FILE"
-    log_ok "Updated plugin config"
+    if [[ -n "$token_file" ]]; then
+        log_ok "Updated plugin config (outbound token: ${token_file##*/workspaces/})"
+    else
+        log_warn "Updated plugin config (no .ax-token.json found for outbound)"
+    fi
 
     # Clean stale env vars from plist (prevents signature verification failures)
     if clean_plist_env; then

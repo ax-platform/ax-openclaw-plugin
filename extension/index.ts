@@ -11,6 +11,7 @@
 
 import type { ClawdbotPluginApi, PluginRuntime } from "clawdbot/plugin-sdk";
 import { createAxChannel, createDispatchHandler, setAxPlatformRuntime, getDispatchSession } from "./channel/ax-channel.js";
+import type { OutboundConfig } from "./lib/types.js";
 import { logRegisteredAgents } from "./lib/auth.js";
 import { axMessagesTool } from "./tools/ax-messages.js";
 import { axTasksTool } from "./tools/ax-tasks.js";
@@ -28,6 +29,7 @@ interface AxPlatformConfig {
     env?: string;
   }>;
   backendUrl?: string;
+  outbound?: OutboundConfig;
 }
 
 const plugin = {
@@ -52,6 +54,14 @@ const plugin = {
         },
       },
       backendUrl: { type: "string" as const },
+      outbound: {
+        type: "object" as const,
+        properties: {
+          mcpEndpoint: { type: "string" as const },
+          tokenFile: { type: "string" as const },
+          defaultSpaceId: { type: "string" as const },
+        },
+      },
     },
   },
 
@@ -61,11 +71,13 @@ const plugin = {
     // Store runtime for channel to access
     setAxPlatformRuntime(api.runtime);
 
-    const config = (api.config || {}) as AxPlatformConfig;
-    api.logger.info(`[ax-platform] Config received: agents=${config.agents?.length || 0}, backendUrl=${config.backendUrl || 'default'}`);
+    // api.config is the full clawdbot.json — extract plugin-specific config
+    const fullConfig = (api.config || {}) as Record<string, any>;
+    const config = (fullConfig?.plugins?.entries?.["ax-platform"]?.config || {}) as AxPlatformConfig;
+    api.logger.info(`[ax-platform] Config received: agents=${config.agents?.length || 0}, backendUrl=${config.backendUrl || 'default'}, outbound=${config.outbound?.tokenFile ? 'configured' : 'none'}`);
 
     // Register the aX Platform channel
-    const channel = createAxChannel(config);
+    const channel = createAxChannel({ ...config, outbound: config.outbound });
     api.registerChannel({ plugin: channel });
     api.logger.info("[ax-platform] Channel registered: ax-platform");
 
