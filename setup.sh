@@ -20,8 +20,22 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/ax-agents.env"
-CONFIG_FILE="$HOME/.clawdbot/clawdbot.json"
-EXTENSION_DIR="$HOME/.clawdbot/extensions/ax-platform"
+# Support both openclaw (new) and clawdbot (legacy)
+if command -v openclaw &> /dev/null; then
+    CLI_CMD="openclaw"
+    CONFIG_DIR="$HOME/.openclaw"
+    CONFIG_FILE="$CONFIG_DIR/openclaw.json"
+    LAUNCH_AGENT="ai.openclaw.gateway"
+elif command -v clawdbot &> /dev/null; then
+    CLI_CMD="clawdbot"
+    CONFIG_DIR="$HOME/.clawdbot"
+    CONFIG_FILE="$CONFIG_DIR/clawdbot.json"
+    LAUNCH_AGENT="com.clawdbot.gateway"
+else
+    echo "ERROR: Neither openclaw nor clawdbot found in PATH"
+    exit 1
+fi
+EXTENSION_DIR="$CONFIG_DIR/extensions/ax-platform"
 
 # Colors
 RED='\033[0;31m'
@@ -89,7 +103,7 @@ check_env_file() {
 
 check_config() {
     if [[ ! -f "$CONFIG_FILE" ]]; then
-        log_error "$CONFIG_FILE not found. Is Clawdbot installed?"
+        log_error "$CONFIG_FILE not found. Is OpenClaw/Clawdbot installed?"
         exit 1
     fi
 }
@@ -152,7 +166,7 @@ cmd_sync() {
     TEMP_CONFIG=$(cat "$CONFIG_FILE" | jq 'del(.plugins.entries["ax-platform"]) | del(.plugins.installs["ax-platform"])')
     echo "$TEMP_CONFIG" > "$CONFIG_FILE"
     cd "$SCRIPT_DIR/extension"
-    if clawdbot plugins install . 2>&1 | grep -v "^\\[" | head -5; then
+    if $CLI_CMD plugins install . 2>&1 | grep -v "^\\[" | head -5; then
         log_ok "Extension installed"
     else
         log_warn "Extension install had warnings (check logs)"
@@ -162,7 +176,7 @@ cmd_sync() {
     log_info "Updating clawdbot.json..."
     # Resolve outbound token file (first .ax-token.json found in workspaces)
     local token_file=""
-    for ws in "$HOME/.clawdbot/workspaces"/*/.ax-token.json; do
+    for ws in "$CONFIG_DIR/workspaces"/*/.ax-token.json; do
         if [[ -f "$ws" ]]; then
             token_file="$ws"
             break
@@ -220,7 +234,7 @@ cmd_clean() {
 
     log_info "Reinstalling plugin..."
     cd "$SCRIPT_DIR/extension"
-    clawdbot plugins install . 2>&1 | grep -v "^\[" || true
+    $CLI_CMD plugins install . 2>&1 | grep -v "^\[" || true
     cd "$SCRIPT_DIR"
 
     log_ok "Clean install complete"
@@ -374,7 +388,7 @@ cmd_list() {
 # Clean up stale AX_* env vars from LaunchAgent plist
 # These can override clawdbot.json config and cause signature verification failures
 clean_plist_env() {
-    local plist_file="$HOME/Library/LaunchAgents/com.clawdbot.gateway.plist"
+    local plist_file="$HOME/Library/LaunchAgents/${LAUNCH_AGENT}.plist"
 
     if [[ ! -f "$plist_file" ]]; then
         return 0  # No plist to clean
@@ -399,9 +413,9 @@ clean_plist_env() {
 # Restart gateway (with full reload if plist changed)
 cmd_restart() {
     log_info "Restarting gateway..."
-    launchctl stop com.clawdbot.gateway 2>/dev/null || true
+    launchctl stop $LAUNCH_AGENT 2>/dev/null || true
     sleep 2
-    launchctl start com.clawdbot.gateway
+    launchctl start $LAUNCH_AGENT
     sleep 3
     log_ok "Gateway restarted"
     cmd_verify
@@ -410,18 +424,18 @@ cmd_restart() {
 # Full reload (unload/load) - needed when plist changes
 cmd_reload() {
     log_info "Reloading gateway (full plist reload)..."
-    launchctl unload ~/Library/LaunchAgents/com.clawdbot.gateway.plist 2>/dev/null || true
+    launchctl unload ~/Library/LaunchAgents/${LAUNCH_AGENT}.plist 2>/dev/null || true
     sleep 2
-    launchctl load ~/Library/LaunchAgents/com.clawdbot.gateway.plist 2>/dev/null || true
+    launchctl load ~/Library/LaunchAgents/${LAUNCH_AGENT}.plist 2>/dev/null || true
     sleep 3
     log_ok "Gateway reloaded"
 }
 
 cmd_restart_quiet() {
     log_info "Restarting gateway..."
-    launchctl stop com.clawdbot.gateway 2>/dev/null || true
+    launchctl stop $LAUNCH_AGENT 2>/dev/null || true
     sleep 2
-    launchctl start com.clawdbot.gateway
+    launchctl start $LAUNCH_AGENT
     sleep 3
     log_ok "Gateway restarted"
 }
@@ -434,13 +448,13 @@ cmd_verify() {
     echo -e "${CYAN}===========================================${NC}"
     echo ""
 
-    if tail -30 ~/.clawdbot/logs/gateway.log 2>/dev/null | grep -q "ax-platform.*Registered agents"; then
-        tail -30 ~/.clawdbot/logs/gateway.log | grep "ax-platform" | grep -E "Registered|@clawd|@clawdbot" | tail -5
+    if tail -30 "$CONFIG_DIR/logs/gateway.log" 2>/dev/null | grep -q "ax-platform.*Registered agents"; then
+        tail -30 "$CONFIG_DIR/logs/gateway.log" | grep "ax-platform" | grep -E "Registered|@" | tail -5
         echo ""
         log_ok "Setup complete!"
     else
         log_warn "Could not verify registration. Check logs:"
-        echo "  tail -f ~/.clawdbot/logs/gateway.log | grep ax-platform"
+        echo "  tail -f $CONFIG_DIR/logs/gateway.log | grep ax-platform"
     fi
     echo ""
 }
@@ -449,7 +463,7 @@ cmd_verify() {
 cmd_logs() {
     log_info "Tailing gateway logs (Ctrl+C to exit)..."
     echo ""
-    tail -f ~/.clawdbot/logs/gateway.log | grep --line-buffered "ax-platform"
+    tail -f "$CONFIG_DIR/logs/gateway.log" | grep --line-buffered "ax-platform"
 }
 
 # Check status
@@ -461,7 +475,7 @@ cmd_status() {
     echo ""
 
     # Gateway
-    if pgrep -f "clawdbot.*gateway" > /dev/null; then
+    if pgrep -f "(clawdbot|openclaw).*gateway" > /dev/null; then
         log_ok "Gateway: Running"
     else
         log_error "Gateway: Not running"

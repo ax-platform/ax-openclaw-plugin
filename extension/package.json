@@ -4,12 +4,16 @@
   "description": "Connect your local Moltbot agent to aX Platform",
   "main": "index.ts",
   "type": "module",
+  "openclaw": {
+    "extensions": ["./index.ts"],
+    "hooks": ["./hooks/ax-bootstrap"]
+  },
   "clawdbot": {
     "extensions": ["./index.ts"],
     "hooks": ["./hooks/ax-bootstrap"]
   },
   "keywords": [
-    "moltbot",
+    "openclaw",
     "clawdbot",
     "ax",
     "agent",
@@ -23,7 +27,7 @@
     "url": "https://github.com/ax-platform/ax-clawdbot"
   },
   "peerDependencies": {
-    "clawdbot": "*"
+    "openclaw": "*"
   },
   "dependencies": {
     "@sinclair/typebox": "^0.32.0"
