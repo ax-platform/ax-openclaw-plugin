@@ -197,12 +197,66 @@ cmd_sync() {
         log_warn "Updated plugin config (no .ax-token.json found for outbound)"
     fi
 
+    # Provision agent directories and config entries
+    # Each agent needs its own agentDir (sessions/models) and workspace to avoid
+    # routing to "main" and DuplicateAgentDirError when multiple agents share a dir
+    if [[ "$AGENT_COUNT" -gt 0 ]]; then
+        log_info "Provisioning agent directories..."
+        local agents_dir="$CONFIG_DIR/agents"
+        local workspaces_dir="$CONFIG_DIR/workspaces"
+        local main_models="$agents_dir/main/agent/models.json"
+
+        local agents_list_json="[]"
+        for handle_raw in $(echo "$AGENTS_JSON" | jq -r '.[].handle // "@agent"'); do
+            local agent_name="${handle_raw#@}"
+            local agent_dir="$agents_dir/$agent_name/agent"
+            local workspace_dir="$workspaces_dir/$agent_name"
+
+            mkdir -p "$agent_dir" "$workspace_dir"
+
+            # Copy models.json from main agent if available and not already present
+            if [[ -f "$main_models" && ! -f "$agent_dir/models.json" ]]; then
+                cp "$main_models" "$agent_dir/models.json"
+            fi
+
+            agents_list_json=$(echo "$agents_list_json" | jq \
+                --arg id "$agent_name" \
+                --arg ws "$workspace_dir" \
+                --arg ad "$agent_dir" \
+                '. + [{id: $id, name: $id, workspace: $ws, agentDir: $ad}]')
+        done
+
+        # Update agents.list: keep "main" entry, replace agent entries
+        UPDATED_CONFIG=$(cat "$CONFIG_FILE" | jq --argjson list "$agents_list_json" '
+            .agents.list = ([(.agents.list // [])[] | select(.id == "main")] + $list)
+        ')
+        echo "$UPDATED_CONFIG" > "$CONFIG_FILE"
+        log_ok "Provisioned $AGENT_COUNT agent workspace(s)"
+
+        # Generate top-level bindings for multi-agent routing
+        # Without bindings, all agents route to "main"
+        log_info "Generating agent bindings..."
+        local bindings_json
+        bindings_json=$(echo "$AGENTS_JSON" | jq '[.[] | {
+            match: {channel: "ax-platform", accountId: (.handle // "@agent" | ltrimstr("@"))},
+            agentId: (.handle // "@agent" | ltrimstr("@"))
+        }]')
+        UPDATED_CONFIG=$(cat "$CONFIG_FILE" | jq --argjson bindings "$bindings_json" '.bindings = $bindings')
+        echo "$UPDATED_CONFIG" > "$CONFIG_FILE"
+        log_ok "Generated $AGENT_COUNT binding(s) for multi-agent routing"
+    fi
+
     # Clean stale env vars from plist (prevents signature verification failures)
-    if clean_plist_env; then
-        cmd_restart_quiet
+    # Only applies to macOS (launchctl); Linux uses systemd
+    if [[ "$(uname)" == "Darwin" ]]; then
+        if clean_plist_env; then
+            cmd_restart_quiet
+        else
+            # Plist was modified - need full reload
+            cmd_reload
+        fi
     else
-        # Plist was modified - need full reload
-        cmd_reload
+        cmd_restart_quiet
     fi
 
     cmd_verify
@@ -413,29 +467,48 @@ clean_plist_env() {
 # Restart gateway (with full reload if plist changed)
 cmd_restart() {
     log_info "Restarting gateway..."
-    launchctl stop $LAUNCH_AGENT 2>/dev/null || true
-    sleep 2
-    launchctl start $LAUNCH_AGENT
+    if [[ "$(uname)" == "Darwin" ]]; then
+        launchctl stop $LAUNCH_AGENT 2>/dev/null || true
+        sleep 2
+        launchctl start $LAUNCH_AGENT
+    else
+        sudo systemctl restart ${LAUNCH_AGENT}.service 2>/dev/null || \
+        systemctl --user restart ${LAUNCH_AGENT}.service 2>/dev/null || \
+        { log_warn "Could not restart via systemctl. Restart manually."; return; }
+    fi
     sleep 3
     log_ok "Gateway restarted"
     cmd_verify
 }
 
-# Full reload (unload/load) - needed when plist changes
+# Full reload (unload/load) - needed when plist changes (macOS only)
 cmd_reload() {
-    log_info "Reloading gateway (full plist reload)..."
-    launchctl unload ~/Library/LaunchAgents/${LAUNCH_AGENT}.plist 2>/dev/null || true
-    sleep 2
-    launchctl load ~/Library/LaunchAgents/${LAUNCH_AGENT}.plist 2>/dev/null || true
+    log_info "Reloading gateway..."
+    if [[ "$(uname)" == "Darwin" ]]; then
+        launchctl unload ~/Library/LaunchAgents/${LAUNCH_AGENT}.plist 2>/dev/null || true
+        sleep 2
+        launchctl load ~/Library/LaunchAgents/${LAUNCH_AGENT}.plist 2>/dev/null || true
+    else
+        sudo systemctl daemon-reload 2>/dev/null || true
+        sudo systemctl restart ${LAUNCH_AGENT}.service 2>/dev/null || \
+        systemctl --user restart ${LAUNCH_AGENT}.service 2>/dev/null || \
+        { log_warn "Could not reload via systemctl. Restart manually."; return; }
+    fi
     sleep 3
     log_ok "Gateway reloaded"
 }
 
 cmd_restart_quiet() {
     log_info "Restarting gateway..."
-    launchctl stop $LAUNCH_AGENT 2>/dev/null || true
-    sleep 2
-    launchctl start $LAUNCH_AGENT
+    if [[ "$(uname)" == "Darwin" ]]; then
+        launchctl stop $LAUNCH_AGENT 2>/dev/null || true
+        sleep 2
+        launchctl start $LAUNCH_AGENT
+    else
+        sudo systemctl restart ${LAUNCH_AGENT}.service 2>/dev/null || \
+        systemctl --user restart ${LAUNCH_AGENT}.service 2>/dev/null || \
+        { log_warn "Could not restart via systemctl. Restart manually."; return; }
+    fi
     sleep 3
     log_ok "Gateway restarted"
 }
