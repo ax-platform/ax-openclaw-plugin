@@ -12,15 +12,19 @@
 import type { ContextData, Message } from "./types.js";
 
 // Configuration - can be overridden per-agent in the future
+// NOTE (2026-02-19): Reduced history window to prevent context overflow in active threads.
+// Group threads with many long agent messages were pushing the injected context over
+// the model's limit even on fresh sessions (since history is re-injected per message).
+// Previous: 5+15=20 messages. Current: 3+7=10 messages.
 const DEFAULT_CONFIG = {
   // How many recent messages to include at full length
-  fullLengthMessages: 5,
+  fullLengthMessages: 3,
   // How many additional messages to include (truncated)
-  additionalMessages: 15,
+  additionalMessages: 7,
   // Max chars for truncated messages (older ones in the window)
-  truncatedMaxChars: 500,
+  truncatedMaxChars: 400,
   // Max chars for full-length messages (most recent)
-  fullMaxChars: 2000,
+  fullMaxChars: 1500,
   // Max agent descriptions
   maxAgentDescChars: 120,
   // Max agents to show
