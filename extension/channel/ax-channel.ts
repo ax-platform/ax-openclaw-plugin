@@ -408,44 +408,33 @@ async function processDispatchAsync(
       }
     }, HEARTBEAT_INTERVAL_MS);
 
-    // Build context for the agent
-  const missionBriefing = buildMissionBriefing(
-    session.agentHandle,
-    session.spaceName,
-    session.senderHandle,
-    session.senderType,
-    session.contextData
-  );
-  const messageWithContext = `${missionBriefing}\n\n---\n\n**Current Message:**\n${message}`;
-
-  // Build context payload
-  const asyncAgentHandle = (session.agentHandle || "agent").replace(/^@/, "");
-  const ctxPayload = {
-    Body: message,
-    BodyForAgent: messageWithContext,
-    RawBody: message,
-    CommandBody: message,
-    BodyForCommands: message,
-    From: `ax-platform:${session.senderHandle}`,
-    To: `ax-platform:${session.agentHandle}`,
-    SessionKey: sessionKey,
-    AccountId: asyncAgentHandle,
-    ChatType: "direct" as const,
-    ConversationLabel: `${session.agentHandle} [${session.spaceName}]${agent.env ? ` (${agent.env})` : ''}`,
-    SenderId: session.senderHandle,
-    Provider: "ax-platform",
-    Surface: "ax-platform",
-    OriginatingChannel: "ax-platform",
-    OriginatingTo: `ax-platform:${session.agentHandle}`,
-    WasMentioned: true,
-    CommandAuthorized: true,
-    AxDispatchId: dispatchId,
-    AxSpaceId: session.spaceId,
-    AxSpaceName: session.spaceName,
-    AxAuthToken: session.authToken,
-    AxMcpEndpoint: session.mcpEndpoint,
-    SystemContext: missionBriefing,
-  };
+    // Build context payload
+    const asyncAgentHandle = (session.agentHandle || "agent").replace(/^@/, "");
+    const ctxPayload = {
+      Body: message,
+      BodyForAgent: message,
+      RawBody: message,
+      CommandBody: message,
+      BodyForCommands: message,
+      From: `ax-platform:${session.senderHandle}`,
+      To: `ax-platform:${session.agentHandle}`,
+      SessionKey: sessionKey,
+      AccountId: asyncAgentHandle,
+      ChatType: "direct" as const,
+      ConversationLabel: `${session.agentHandle} [${session.spaceName}]${agent.env ? ` (${agent.env})` : ''}`,
+      SenderId: session.senderHandle,
+      Provider: "ax-platform",
+      Surface: "ax-platform",
+      OriginatingChannel: "ax-platform",
+      OriginatingTo: `ax-platform:${session.agentHandle}`,
+      WasMentioned: true,
+      CommandAuthorized: true,
+      AxDispatchId: dispatchId,
+      AxSpaceId: session.spaceId,
+      AxSpaceName: session.spaceName,
+      AxAuthToken: session.authToken,
+      AxMcpEndpoint: session.mcpEndpoint,
+    };
 
     // Collect response
     let responseText = "";
@@ -1145,26 +1134,13 @@ export function createDispatchHandler(
         sendProgressUpdate(backendUrl, payload.auth_token, dispatchId, "processing", "thinking");
       }
 
-      // Build context for the agent (identity, collaborators, recent conversation)
-      const missionBriefing = buildMissionBriefing(
-        session.agentHandle,
-        session.spaceName,
-        session.senderHandle,
-        session.senderType,
-        session.contextData
-      );
-
-      // Prepend mission briefing to the message so the agent sees it in context
-      // This ensures the agent knows its identity even in sandboxed mode
-      const messageWithContext = `${missionBriefing}\n\n---\n\n**Current Message:**\n${message}`;
-
       // Get runtime for agent execution
       const runtime = getAxPlatformRuntime();
 
       // Build context payload (matching BlueBubbles pattern)
       const ctxPayload = {
         Body: message,
-        BodyForAgent: messageWithContext, // Include mission briefing in agent context
+        BodyForAgent: message,
         RawBody: message,
         CommandBody: message,
         BodyForCommands: message,
@@ -1187,8 +1163,6 @@ export function createDispatchHandler(
         AxSpaceName: session.spaceName,
         AxAuthToken: session.authToken,
         AxMcpEndpoint: session.mcpEndpoint,
-        // Mission briefing for context
-        SystemContext: missionBriefing,
       };
 
       // Collect response text
@@ -1196,7 +1170,7 @@ export function createDispatchHandler(
       let deliverCallCount = 0;
       let lastError: string | null = null;
 
-      api.logger.info(`[ax-platform] Calling dispatcher for session ${sessionKey} (message=${message.length} chars, context=${missionBriefing.length} chars)`);
+      api.logger.info(`[ax-platform] Calling dispatcher for session ${sessionKey} (message=${message.length} chars)`);
       const startTime = Date.now();
 
       // Dispatch to agent — use top-level config for proper agent resolution
