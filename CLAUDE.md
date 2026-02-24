@@ -15,17 +15,25 @@ Guidance for Claude Code when working with the **aX Platform Plugin for Clawdbot
 ./setup.sh status
 ```
 
-## IMPORTANT: Rebuild After Code Changes
+## IMPORTANT: Deploy After Code Changes
 
-**After modifying any TypeScript files in `extension/`, you MUST rebuild and restart:**
+**After modifying any TypeScript files in `extension/`, you MUST deploy and restart:**
 
 ```bash
 ./setup.sh sync
 ```
 
-This copies the updated code to `~/.clawdbot/extensions/ax-platform/` and restarts the gateway.
+This does three things:
+1. Copies extension code from `extension/` to `~/.openclaw/extensions/ax-platform/`
+2. Updates agent credentials from `ax-agents.env` (preserves all other config)
+3. Restarts the gateway to pick up changes
 
 **Without this step, your code changes will NOT take effect!**
+
+**SAFETY:** `sync` only updates agent credentials and copies extension files.
+It never overwrites `backendUrl`, `outbound` config, workspace paths, heartbeat
+settings, model config, or other user-managed settings in `openclaw.json`.
+Config is backed up before every sync to `~/.openclaw/backups/`.
 
 Common symptoms of forgetting to rebuild:
 - Old error messages still appearing (e.g., "[Duplicate dispatch - already processed]" instead of new message)

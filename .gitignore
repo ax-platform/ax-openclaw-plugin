@@ -10,8 +10,8 @@ node_modules/
 # Environment files
 .env
 
-# Local docs (gitignored, fetched separately)
-docs/
+# Local docs - keep tracked (auth setup guide, etc.)
+# docs/
 
 # Agent config files (contain secrets)
 ax-agents.yaml

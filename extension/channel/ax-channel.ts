@@ -78,6 +78,42 @@ const DEDUP_TTL_MS = 15 * 60 * 1000; // 15 minutes (must exceed backend timeout 
 const DEDUP_CLEANUP_INTERVAL_MS = 60 * 1000; // Clean up every minute
 const SESSION_CLEANUP_DELAY_MS = 1000; // Grace period before session cleanup
 const LOG_PREVIEW_LENGTH = 100; // Max chars to show in log previews
+const RECOVERY_NOTICE_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes per space
+
+// Raw internal errors that should never be forwarded verbatim to users
+const RAW_INTERNAL_ERROR_PATTERNS = {
+  context: [
+    "context overflow",
+    "prompt too large for the model",
+    "try /reset",
+    "try /new",
+  ],
+  rate: [
+    "api rate limit reached",
+    "rate limit",
+    "too many requests",
+  ],
+};
+
+const recoveryNoticeBySpace = new Map<string, number>();
+
+function classifyInternalErrorText(text: string): "context" | "rate" | null {
+  const normalized = text.toLowerCase();
+  if (RAW_INTERNAL_ERROR_PATTERNS.context.some((p) => normalized.includes(p))) {
+    return "context";
+  }
+  if (RAW_INTERNAL_ERROR_PATTERNS.rate.some((p) => normalized.includes(p))) {
+    return "rate";
+  }
+  return null;
+}
+
+function buildRecoveryNotice(kind: "context" | "rate"): string {
+  if (kind === "context") {
+    return "Quick heads up — I’m compacting internal context and will follow with a clean response shortly.";
+  }
+  return "Quick heads up — I hit temporary model capacity and am retrying now. I’ll send the full response shortly.";
+}
 
 // Dispatch state for deduplication
 type DispatchState = {
@@ -408,44 +444,33 @@ async function processDispatchAsync(
       }
     }, HEARTBEAT_INTERVAL_MS);
 
-    // Build context for the agent
-  const missionBriefing = buildMissionBriefing(
-    session.agentHandle,
-    session.spaceName,
-    session.senderHandle,
-    session.senderType,
-    session.contextData
-  );
-  const messageWithContext = `${missionBriefing}\n\n---\n\n**Current Message:**\n${message}`;
-
-  // Build context payload
-  const asyncAgentHandle = (session.agentHandle || "agent").replace(/^@/, "");
-  const ctxPayload = {
-    Body: message,
-    BodyForAgent: messageWithContext,
-    RawBody: message,
-    CommandBody: message,
-    BodyForCommands: message,
-    From: `ax-platform:${session.senderHandle}`,
-    To: `ax-platform:${session.agentHandle}`,
-    SessionKey: sessionKey,
-    AccountId: asyncAgentHandle,
-    ChatType: "direct" as const,
-    ConversationLabel: `${session.agentHandle} [${session.spaceName}]${agent.env ? ` (${agent.env})` : ''}`,
-    SenderId: session.senderHandle,
-    Provider: "ax-platform",
-    Surface: "ax-platform",
-    OriginatingChannel: "ax-platform",
-    OriginatingTo: `ax-platform:${session.agentHandle}`,
-    WasMentioned: true,
-    CommandAuthorized: true,
-    AxDispatchId: dispatchId,
-    AxSpaceId: session.spaceId,
-    AxSpaceName: session.spaceName,
-    AxAuthToken: session.authToken,
-    AxMcpEndpoint: session.mcpEndpoint,
-    SystemContext: missionBriefing,
-  };
+    // Build context payload
+    const asyncAgentHandle = (session.agentHandle || "agent").replace(/^@/, "");
+    const ctxPayload = {
+      Body: message,
+      BodyForAgent: message,
+      RawBody: message,
+      CommandBody: message,
+      BodyForCommands: message,
+      From: `ax-platform:${session.senderHandle}`,
+      To: `ax-platform:${session.agentHandle}`,
+      SessionKey: sessionKey,
+      AccountId: asyncAgentHandle,
+      ChatType: "direct" as const,
+      ConversationLabel: `${session.agentHandle} [${session.spaceName}]${agent.env ? ` (${agent.env})` : ''}`,
+      SenderId: session.senderHandle,
+      Provider: "ax-platform",
+      Surface: "ax-platform",
+      OriginatingChannel: "ax-platform",
+      OriginatingTo: `ax-platform:${session.agentHandle}`,
+      WasMentioned: true,
+      CommandAuthorized: true,
+      AxDispatchId: dispatchId,
+      AxSpaceId: session.spaceId,
+      AxSpaceName: session.spaceName,
+      AxAuthToken: session.authToken,
+      AxMcpEndpoint: session.mcpEndpoint,
+    };
 
     // Collect response
     let responseText = "";
@@ -739,14 +764,29 @@ export function createAxChannel(config: {
           return { channel: "ax-platform", ok: false, error: "No target space" };
         }
 
+        let outboundText = text || "";
+        const internalErrorKind = classifyInternalErrorText(outboundText);
+        if (internalErrorKind) {
+          const now = Date.now();
+          const lastNoticeAt = recoveryNoticeBySpace.get(spaceId) || 0;
+          if (now - lastNoticeAt < RECOVERY_NOTICE_COOLDOWN_MS) {
+            logger.info(`[ax-platform] Suppressing duplicate internal error notice (${internalErrorKind}) for ${spaceId}`);
+            return { channel: "ax-platform", ok: true, suppressed: true };
+          }
+
+          outboundText = buildRecoveryNotice(internalErrorKind);
+          recoveryNoticeBySpace.set(spaceId, now);
+          logger.info(`[ax-platform] Replaced raw internal error text with graceful recovery notice (${internalErrorKind})`);
+        }
+
         try {
           const result = await callAxTool(mcpEndpoint, authToken, "messages", {
             action: "send",
-            content: text,
+            content: outboundText,
             space_id: spaceId,
           }) as Record<string, unknown>;
 
-          const preview = text.length > 50 ? text.substring(0, 50) + "..." : text;
+          const preview = outboundText.length > 50 ? outboundText.substring(0, 50) + "..." : outboundText;
           logger.info(`[ax-platform] Outbound sent to ${spaceId}: ${preview}`);
           return { channel: "ax-platform", ok: true, messageId: result.message_id };
         } catch (err) {
@@ -1145,26 +1185,13 @@ export function createDispatchHandler(
         sendProgressUpdate(backendUrl, payload.auth_token, dispatchId, "processing", "thinking");
       }
 
-      // Build context for the agent (identity, collaborators, recent conversation)
-      const missionBriefing = buildMissionBriefing(
-        session.agentHandle,
-        session.spaceName,
-        session.senderHandle,
-        session.senderType,
-        session.contextData
-      );
-
-      // Prepend mission briefing to the message so the agent sees it in context
-      // This ensures the agent knows its identity even in sandboxed mode
-      const messageWithContext = `${missionBriefing}\n\n---\n\n**Current Message:**\n${message}`;
-
       // Get runtime for agent execution
       const runtime = getAxPlatformRuntime();
 
       // Build context payload (matching BlueBubbles pattern)
       const ctxPayload = {
         Body: message,
-        BodyForAgent: messageWithContext, // Include mission briefing in agent context
+        BodyForAgent: message,
         RawBody: message,
         CommandBody: message,
         BodyForCommands: message,
@@ -1187,8 +1214,6 @@ export function createDispatchHandler(
         AxSpaceName: session.spaceName,
         AxAuthToken: session.authToken,
         AxMcpEndpoint: session.mcpEndpoint,
-        // Mission briefing for context
-        SystemContext: missionBriefing,
       };
 
       // Collect response text
@@ -1196,7 +1221,7 @@ export function createDispatchHandler(
       let deliverCallCount = 0;
       let lastError: string | null = null;
 
-      api.logger.info(`[ax-platform] Calling dispatcher for session ${sessionKey} (message=${message.length} chars, context=${missionBriefing.length} chars)`);
+      api.logger.info(`[ax-platform] Calling dispatcher for session ${sessionKey} (message=${message.length} chars)`);
       const startTime = Date.now();
 
       // Dispatch to agent — use top-level config for proper agent resolution
