@@ -161,6 +161,15 @@ update_extension() {
         cp -r "$source_dir/"* "$EXTENSION_DIR/"
     fi
 
+    # Install dependencies if package.json exists
+    if [[ -f "$EXTENSION_DIR/package.json" ]]; then
+        log_info "Installing dependencies..."
+        (cd "$EXTENSION_DIR" && npm install --omit=dev --no-audit --no-fund --loglevel=error 2>&1) || {
+            log_warn "npm install had warnings (non-fatal)"
+        }
+        log_ok "Dependencies installed"
+    fi
+
     # Ensure installs manifest exists in config
     local has_install=$(jq -r '.plugins.installs["ax-platform"] // empty' "$CONFIG_FILE")
     if [[ -z "$has_install" ]]; then

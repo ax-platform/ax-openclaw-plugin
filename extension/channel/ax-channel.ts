@@ -115,6 +115,98 @@ function buildRecoveryNotice(kind: "context" | "rate"): string {
   return "Quick heads up — I hit temporary model capacity and am retrying now. I’ll send the full response shortly.";
 }
 
+// ─── Response Content Sanitizer ───────────────────────────────────────────────
+// Strip reasoning/thinking blocks and system noise from agent responses before
+// they are persisted as messages. Only the final answer should be visible.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Strip reasoning blocks, system noise, and thinking preambles from agent
+ * response text so that only the final answer is persisted in the chat.
+ *
+ * Patterns handled:
+ * 1. "Reasoning: _italic block_" at the start — strip everything before the answer
+ * 2. Multi-line "Reasoning:\n_..._\n" blocks — strip the reasoning portion
+ * 3. Standalone "Reasoning: _..._" that IS the entire message — extract answer after closing _
+ * 4. System metadata lines (Identity, Channel, Runtime, etc.)
+ * 5. OpenClaw status blocks (🦞 / 🧭)
+ */
+function sanitizeAgentResponse(raw: string): string {
+  if (!raw) return raw;
+
+  let text = raw;
+
+  // 1. Strip leading "Reasoning: _..._" block followed by actual answer
+  //    Pattern: starts with "Reasoning:" then italic block, then answer text
+  //    e.g. "Reasoning: _I think about X_ Here is my answer"
+  text = text.replace(
+    /^Reasoning:\s*_[\s\S]*?_\s*/i,
+    ""
+  );
+
+  // 2. Strip "Reasoning: _..._" blocks that appear mid-text (e.g. after a NO_REPLY)
+  text = text.replace(
+    /Reasoning:\s*_[\s\S]*?_\s*/gi,
+    ""
+  );
+
+  // 3. Strip "Reasoning:" followed by non-italic content up to a double newline or end
+  //    e.g. "Reasoning: I considered several approaches\n\nHere is my answer"
+  text = text.replace(
+    /^Reasoning:\s*[^\n]*(?:\n(?!\n)[^\n]*)*/i,
+    ""
+  );
+
+  // 4. Strip 🧭 Identity blocks
+  text = text.replace(
+    /^🧭\s*Identity\s*\n(?:(?:Channel|User\s*id|AllowFrom|Session|Runtime|Host|Model)[^\n]*\n?)*/gim,
+    ""
+  );
+
+  // 5. Strip 🦞 OpenClaw status blocks
+  text = text.replace(
+    /^🦞\s*OpenClaw[^\n]*(?:\n(?![\n\r])[^\n]*)*/gim,
+    ""
+  );
+
+  // 6. Strip standalone system metadata lines
+  text = text.replace(
+    /^\s*(?:[*_`~>]+\s*)?(?:Runtime|Channel|Session|Agent|Identity|AllowFrom|User\s*id)(?:\s*[*_`~]+)?\s*:[^\n]*$/gim,
+    ""
+  );
+
+  // 7. Strip toggle-only reasoning/thinking lines (e.g. "Reasoning: on")
+  text = text.replace(
+    /^\s*(?:[*_`~>]+\s*)?(?:Thinking|Reasoning)(?:\s*[*_`~]+)?\s*:\s*(?:[*_`~]+\s*)?(?:on|off|enabled|disabled)\s*$/gim,
+    ""
+  );
+
+  // 8. Strip italic self-talk preamble
+  //    Agents (especially project_lead) wrap internal monologue in _italics_
+  //    before the actual answer. Find the last closing _ followed by the start
+  //    of real content (uppercase, bold, heading, number) and extract the tail.
+  //    Skips messages without italic preamble patterns.
+  for (let i = text.length - 2; i >= 0; i--) {
+    if (text[i] === "_") {
+      const after = text[i + 1];
+      if (/[A-Z*#\[0-9]/.test(after)) {
+        const tail = text.substring(i + 1).trim();
+        const before = text.substring(0, i);
+        // Only extract if: substantial tail, and there's italic content before
+        if (tail.length >= 10 && before.includes("_")) {
+          text = tail;
+          break;
+        }
+      }
+    }
+  }
+
+  // 9. Collapse excessive newlines
+  text = text.replace(/\n{3,}/g, "\n\n");
+
+  return text.trim();
+}
+
 // Dispatch state for deduplication
 type DispatchState = {
   status: "in_progress" | "completed";
@@ -514,7 +606,7 @@ async function processDispatchAsync(
     let completionStatus: "success" | "failed" = "success";
 
     if (responseText) {
-      finalResponse = responseText;
+      finalResponse = sanitizeAgentResponse(responseText);
     } else if (lastError) {
       finalResponse = `[Agent error: ${lastError}]`;
       completionStatus = "failed";
@@ -536,7 +628,7 @@ async function processDispatchAsync(
         {
           agent_name: payload.agent_name || payload.agent_handle,
           agent_id: payload.agent_id,
-          org_id: payload.org_id,
+          org_id: payload.org_id || payload.space_id || session.spaceId,
           message_id: payload.message_id,
           completion_status: completionStatus,
           response: finalResponse,
@@ -778,6 +870,9 @@ export function createAxChannel(config: {
           recoveryNoticeBySpace.set(spaceId, now);
           logger.info(`[ax-platform] Replaced raw internal error text with graceful recovery notice (${internalErrorKind})`);
         }
+
+        // Sanitize outbound text (strip reasoning blocks, system noise, identity blocks)
+        outboundText = sanitizeAgentResponse(outboundText);
 
         try {
           const result = await callAxTool(mcpEndpoint, authToken, "messages", {
@@ -1162,7 +1257,10 @@ export function createDispatchHandler(
               payload.callback_url,
               payload.callback_api_key,
               {
+                agent_name: payload.agent_name || payload.agent_handle,
                 agent_id: payload.agent_id,
+                org_id: payload.org_id || payload.space_id || session.spaceId,
+                message_id: payload.message_id,
                 completion_status: "failed",
                 error: String(err),
               },
@@ -1282,7 +1380,7 @@ export function createDispatchHandler(
       // In this case, deliver() is never called because NO_REPLY is filtered out
       let finalResponse: string;
       if (responseText) {
-        finalResponse = responseText;
+        finalResponse = sanitizeAgentResponse(responseText);
       } else if (lastError) {
         finalResponse = `[Agent error: ${lastError}]`;
       } else if (deliverCallCount === 0) {
