@@ -126,7 +126,12 @@ const plugin = {
 
     // Register HTTP handler for /ax/dispatch
     const dispatchHandler = createDispatchHandler(api, config);
-    api.registerHttpHandler(dispatchHandler);
+    api.registerHttpRoute({
+      path: "/ax/dispatch",
+      handler: dispatchHandler,
+      auth: "plugin",
+      match: "prefix",
+    });
     api.logger.info("[ax-platform] HTTP handler registered: /ax/dispatch");
 
     api.logger.info("[ax-platform] Plugin loaded successfully");
